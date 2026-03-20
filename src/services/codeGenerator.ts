@@ -33,7 +33,7 @@ function httpMethod(opName: string): 'GET' | 'POST' | 'PUT' | 'DELETE' {
 
 /** Map Java type to a sample value for use in tests */
 function sampleValue(javaType: string, fieldName: string): string {
-  const t = javaType.replace('List<', '').replace('>', '');
+  const t = javaType.replace('List<', '').replaceAll('>', '');
   if (t === 'String') return `"test${toPascal(fieldName)}"`;
   if (t === 'Integer' || t === 'int') return '1';
   if (t === 'Long' || t === 'long') return '1L';
@@ -368,8 +368,6 @@ export function generateAllFiles(op: WsdlOperation, pkg = 'com.ncentral.api'): G
     controller: generateController(op, pkg),
   };
 }
-
-// ── test generators ───────────────────────────────────────────────────────
 
 export function generateUnitTests(op: WsdlOperation, pkg = 'com.ncentral.api'): string {
   const pascal = toPascal(op.name);

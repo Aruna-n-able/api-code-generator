@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
 import { Send, Bot, User, Loader2, AlertCircle, Lightbulb } from 'lucide-react';
-import type { ChatMessage, GeneratedFiles } from '../types';
+import type { ChatMessage, GeneratedFiles, Language } from '../types';
 import { refineWithAI } from '../services/openaiService';
 
-const QUICK_PROMPTS = [
+const JAVA_QUICK_PROMPTS = [
   'Add comprehensive input validation with @NotNull and @NotBlank annotations',
   'Add custom exception handling with @ExceptionHandler and a global error response',
   'Add caching with @Cacheable on the service method',
@@ -13,11 +13,22 @@ const QUICK_PROMPTS = [
   'Add retry logic with @Retryable for SOAP client failures',
 ];
 
+const PYTHON_QUICK_PROMPTS = [
+  'Add Pydantic field validators and custom error messages',
+  'Add a global exception handler with FastAPI ExceptionHandler',
+  'Add Redis caching with fastapi-cache2',
+  'Add pagination using limit/offset query parameters',
+  'Add structured logging with structlog or loguru',
+  'Add retry logic with tenacity for SOAP client failures',
+  'Add rate limiting with slowapi',
+];
+
 interface Props {
   messages: ChatMessage[];
   files: GeneratedFiles;
   operationName: string;
   apiKey: string;
+  language: Language;
   onMessagesChange: (msgs: ChatMessage[]) => void;
   onFilesUpdate: (updates: Partial<GeneratedFiles>) => void;
   onSatisfied: () => void;
@@ -29,6 +40,7 @@ export default function ChatInterface({
   files,
   operationName,
   apiKey,
+  language,
   onMessagesChange,
   onFilesUpdate,
   onSatisfied,
@@ -40,6 +52,7 @@ export default function ChatInterface({
   const endRef = useRef<HTMLDivElement>(null);
 
   const hasApiKey = !!apiKey.trim();
+  const quickPrompts = language === 'python' ? PYTHON_QUICK_PROMPTS : JAVA_QUICK_PROMPTS;
 
   const send = async (userText: string) => {
     if (!userText.trim() || loading) return;
@@ -78,6 +91,7 @@ export default function ChatInterface({
         history: messages,
         currentCode,
         operationName,
+        language,
       });
 
       const assistantMsg: ChatMessage = {
@@ -188,7 +202,7 @@ export default function ChatInterface({
             <span>Quick suggestions</span>
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {QUICK_PROMPTS.slice(0, 4).map((p) => (
+            {quickPrompts.slice(0, 4).map((p) => (
               <button
                 key={p}
                 onClick={() => send(p)}

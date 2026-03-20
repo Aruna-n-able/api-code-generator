@@ -2,28 +2,71 @@ import { useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Copy, Check, Download } from 'lucide-react';
-import type { CodeTab, GeneratedFiles } from '../types';
+import type { CodeTab, GeneratedFiles, Language } from '../types';
 
-const TABS: { key: CodeTab; label: string; fileName: (op: string) => string }[] = [
-  { key: 'controller',       label: 'Controller',    fileName: (op) => `${op}Controller.java` },
-  { key: 'serviceInterface', label: 'Service',        fileName: (op) => `${op}Service.java` },
-  { key: 'serviceImpl',      label: 'ServiceImpl',    fileName: (op) => `${op}ServiceImpl.java` },
-  { key: 'transformer',      label: 'Transformer',    fileName: (op) => `${op}Transformer.java` },
-  { key: 'requestDto',       label: 'RequestDTO',     fileName: (op) => `${op}Request.java` },
-  { key: 'responseDto',      label: 'ResponseDTO',    fileName: (op) => `${op}Response.java` },
+interface TabDef {
+  key: CodeTab;
+  label: string;
+  javaFileName: (op: string) => string;
+  pythonFileName: (op: string) => string;
+}
+
+const TABS: TabDef[] = [
+  {
+    key: 'controller',
+    label: 'Controller',
+    javaFileName: (op) => `${op}Controller.java`,
+    pythonFileName: (op) => `${op.toLowerCase()}_router.py`,
+  },
+  {
+    key: 'serviceInterface',
+    label: 'Service',
+    javaFileName: (op) => `${op}Service.java`,
+    pythonFileName: (op) => `${op.toLowerCase()}_service_base.py`,
+  },
+  {
+    key: 'serviceImpl',
+    label: 'ServiceImpl',
+    javaFileName: (op) => `${op}ServiceImpl.java`,
+    pythonFileName: (op) => `${op.toLowerCase()}_service.py`,
+  },
+  {
+    key: 'transformer',
+    label: 'Transformer',
+    javaFileName: (op) => `${op}Transformer.java`,
+    pythonFileName: (op) => `${op.toLowerCase()}_transformer.py`,
+  },
+  {
+    key: 'requestDto',
+    label: 'RequestDTO',
+    javaFileName: (op) => `${op}Request.java`,
+    pythonFileName: (op) => `${op.toLowerCase()}_request.py`,
+  },
+  {
+    key: 'responseDto',
+    label: 'ResponseDTO',
+    javaFileName: (op) => `${op}Response.java`,
+    pythonFileName: (op) => `${op.toLowerCase()}_response.py`,
+  },
 ];
 
 interface Props {
   files: GeneratedFiles;
   operationName: string;
+  language: Language;
 }
 
-export default function GeneratedCode({ files, operationName }: Props) {
+export default function GeneratedCode({ files, operationName, language }: Props) {
   const [activeTab, setActiveTab] = useState<CodeTab>('controller');
   const [copied, setCopied] = useState(false);
 
   const currentTab = TABS.find((t) => t.key === activeTab)!;
   const code = files[activeTab];
+  const fileName =
+    language === 'java'
+      ? currentTab.javaFileName(operationName)
+      : currentTab.pythonFileName(operationName);
+  const syntaxLang = language === 'java' ? 'java' : 'python';
 
   const copyCode = async () => {
     await navigator.clipboard.writeText(code);
@@ -36,7 +79,7 @@ export default function GeneratedCode({ files, operationName }: Props) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = currentTab.fileName(operationName);
+    a.download = fileName;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -64,9 +107,7 @@ export default function GeneratedCode({ files, operationName }: Props) {
       <div className="flex-1 relative rounded-b-lg rounded-tr-lg overflow-hidden border border-slate-700 bg-[#1e1e1e]">
         {/* Toolbar */}
         <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/60 bg-slate-800/60">
-          <span className="text-xs text-slate-400 font-mono">
-            {currentTab.fileName(operationName)}
-          </span>
+          <span className="text-xs text-slate-400 font-mono">{fileName}</span>
           <div className="flex gap-2">
             <button
               onClick={downloadFile}
@@ -92,7 +133,7 @@ export default function GeneratedCode({ files, operationName }: Props) {
         {/* Syntax highlighted code */}
         <div className="overflow-auto h-full max-h-[440px]">
           <SyntaxHighlighter
-            language="java"
+            language={syntaxLang}
             style={vscDarkPlus}
             customStyle={{
               margin: 0,

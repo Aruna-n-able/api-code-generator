@@ -36,6 +36,9 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Supported code-generation target languages */
+export type Language = 'java' | 'python';
+
 export type CodeTab =
   | 'requestDto'
   | 'responseDto'
@@ -45,3 +48,4 @@ export type CodeTab =
   | 'controller';
 
 export type TestTab = 'unit' | 'robot';
+

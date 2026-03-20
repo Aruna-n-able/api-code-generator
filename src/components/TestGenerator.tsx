@@ -2,17 +2,19 @@ import { useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Copy, Check, Download, Loader2, FlaskConical, Bot } from 'lucide-react';
-import type { TestTab, WsdlOperation, GeneratedFiles } from '../types';
+import type { TestTab, WsdlOperation, GeneratedFiles, Language } from '../types';
 import { generateUnitTests, generateRobotTests } from '../services/codeGenerator';
+import { pyUnitTests, pyRobotTests } from '../services/pythonCodeGenerator';
 import { generateTestsWithAI } from '../services/openaiService';
 
 interface Props {
   operation: WsdlOperation;
   files: GeneratedFiles;
   apiKey: string;
+  language: Language;
 }
 
-export default function TestGenerator({ operation, files, apiKey }: Props) {
+export default function TestGenerator({ operation, files, apiKey, language }: Props) {
   const [activeTab, setActiveTab] = useState<TestTab>('unit');
   const [unitTests, setUnitTests] = useState('');
   const [robotTests, setRobotTests] = useState('');
@@ -37,9 +39,12 @@ export default function TestGenerator({ operation, files, apiKey }: Props) {
           requestDto: files.requestDto,
           responseDto: files.responseDto,
         };
-        const result = await generateTestsWithAI(apiKey, operation.name, currentCode);
+        const result = await generateTestsWithAI(apiKey, operation.name, currentCode, language);
         if (result.unitTests) setUnitTests(result.unitTests);
         if (result.robotTests) setRobotTests(result.robotTests);
+      } else if (language === 'python') {
+        setUnitTests(pyUnitTests(operation));
+        setRobotTests(pyRobotTests(operation));
       } else {
         setUnitTests(generateUnitTests(operation));
         setRobotTests(generateRobotTests(operation));
@@ -51,12 +56,15 @@ export default function TestGenerator({ operation, files, apiKey }: Props) {
     }
   };
 
+  const isPython = language === 'python';
   const currentCode = activeTab === 'unit' ? unitTests : robotTests;
-  const language = activeTab === 'unit' ? 'java' : 'robotframework';
-  const fileName =
-    activeTab === 'unit'
-      ? `${operation.name}ServiceImplTest.java`
-      : `${operation.name}Tests.robot`;
+  const unitLang = isPython ? 'python' : 'java';
+  const language2 = activeTab === 'unit' ? unitLang : 'robotframework';
+  const unitFileName = isPython
+    ? `test_${operation.name.toLowerCase()}_service.py`
+    : `${operation.name}ServiceImplTest.java`;
+  const robotFileName = `${operation.name}Tests.robot`;
+  const fileName = activeTab === 'unit' ? unitFileName : robotFileName;
 
   const copy = async () => {
     await navigator.clipboard.writeText(currentCode);
@@ -74,6 +82,8 @@ export default function TestGenerator({ operation, files, apiKey }: Props) {
     URL.revokeObjectURL(url);
   };
 
+  const unitTabLabel = isPython ? 'pytest Tests' : 'Unit Tests (JUnit 5 / Mockito)';
+
   return (
     <div className="flex flex-col gap-4">
       {/* Header + generate button */}
@@ -81,6 +91,9 @@ export default function TestGenerator({ operation, files, apiKey }: Props) {
         <div className="flex items-center gap-2">
           <FlaskConical className="w-5 h-5 text-emerald-400" />
           <h3 className="text-sm font-semibold text-white">Test Generation</h3>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-400">
+            {isPython ? '🐍 pytest + Robot' : '☕ JUnit 5 + Robot'}
+          </span>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -121,7 +134,7 @@ export default function TestGenerator({ operation, files, apiKey }: Props) {
       {(unitTests || robotTests) && (
         <>
           <div className="flex gap-1">
-            {([['unit', 'Unit Tests (JUnit 5 / Mockito)'], ['robot', 'Robot Framework Tests']] as const).map(([key, label]) => (
+            {([['unit', unitTabLabel], ['robot', 'Robot Framework Tests']] as const).map(([key, label]) => (
               <button
                 key={key}
                 onClick={() => setActiveTab(key)}
@@ -154,13 +167,13 @@ export default function TestGenerator({ operation, files, apiKey }: Props) {
 
             <div className="overflow-auto max-h-80">
               <SyntaxHighlighter
-                language={language}
+                language={language2}
                 style={vscDarkPlus}
                 customStyle={{ margin: 0, padding: '12px 16px', background: 'transparent', fontSize: '12px', lineHeight: '1.6' }}
                 showLineNumbers
                 lineNumberStyle={{ color: '#4a5568', fontSize: '11px', minWidth: '2.5em' }}
               >
-                {currentCode || '// Click "Generate Tests" to create test files'}
+                {currentCode || '# Click "Generate Tests" to create test files'}
               </SyntaxHighlighter>
             </div>
           </div>
@@ -170,7 +183,8 @@ export default function TestGenerator({ operation, files, apiKey }: Props) {
       {!unitTests && !robotTests && !loading && (
         <div className="text-center py-6 text-slate-500 text-sm">
           <FlaskConical className="w-8 h-8 mx-auto mb-2 opacity-30" />
-          <p>Click <strong className="text-slate-400">Generate Tests</strong> to create unit tests and Robot Framework tests.</p>
+          <p>Click <strong className="text-slate-400">Generate Tests</strong> to create{' '}
+            {isPython ? 'pytest' : 'JUnit 5'} unit tests and Robot Framework tests.</p>
           {!hasApiKey && (
             <p className="text-xs mt-1 text-slate-600">Add an OpenAI API key to enable AI-enhanced test generation.</p>
           )}

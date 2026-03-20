@@ -17,8 +17,10 @@ import GeneratedCode from './components/GeneratedCode';
 import ChatInterface from './components/ChatInterface';
 import TestGenerator from './components/TestGenerator';
 import ApiKeyInput from './components/ApiKeyInput';
+import LanguageSelector from './components/LanguageSelector';
 import { generateAllFiles } from './services/codeGenerator';
-import type { WsdlInfo, WsdlOperation, GeneratedFiles, ChatMessage } from './types';
+import { pyGenerateAllFiles } from './services/pythonCodeGenerator';
+import type { WsdlInfo, WsdlOperation, GeneratedFiles, ChatMessage, Language } from './types';
 
 type Stage = 'idle' | 'generating' | 'generated' | 'satisfied';
 
@@ -26,6 +28,9 @@ export default function App() {
   // WSDL state
   const [wsdlInfo, setWsdlInfo] = useState<WsdlInfo | null>(null);
   const [selectedOp, setSelectedOp] = useState<WsdlOperation | null>(null);
+
+  // Language selection
+  const [language, setLanguage] = useState<Language>('java');
 
   // Generation state
   const [stage, setStage] = useState<Stage>('idle');
@@ -54,17 +59,27 @@ export default function App() {
     setChatMessages([]);
   }, []);
 
+  // When language changes, reset generation so user re-generates for the new language
+  const handleLanguageChange = useCallback((lang: Language) => {
+    setLanguage(lang);
+    setStage('idle');
+    setFiles(null);
+    setChatMessages([]);
+  }, []);
+
   const handleGenerate = useCallback(() => {
     if (!selectedOp) return;
     setStage('generating');
-    // Simulate brief async for UX feedback
     setTimeout(() => {
-      const generated = generateAllFiles(selectedOp);
+      const generated =
+        language === 'python'
+          ? pyGenerateAllFiles(selectedOp)
+          : generateAllFiles(selectedOp);
       setFiles(generated);
       setStage('generated');
       setChatMessages([]);
     }, 600);
-  }, [selectedOp]);
+  }, [selectedOp, language]);
 
   const handleFilesUpdate = useCallback((updates: Partial<GeneratedFiles>) => {
     setFiles((prev) => (prev ? { ...prev, ...updates } : prev));
@@ -81,6 +96,12 @@ export default function App() {
   const isGenerated = stage === 'generated' || stage === 'satisfied';
   const isSatisfied = stage === 'satisfied';
 
+  const langLabel = language === 'java' ? '☕ Java' : '🐍 Python';
+  const langDesc =
+    language === 'java'
+      ? 'Spring Boot 3 · Lombok · Jakarta EE'
+      : 'FastAPI · Pydantic v2 · zeep';
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col">
       {/* ── Header ──────────────────────────────────────────────────────── */}
@@ -92,7 +113,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-sm font-semibold text-white leading-tight">API Code Generator</h1>
-              <p className="text-[10px] text-slate-500 leading-tight">N-Central WSDL → Spring Boot REST</p>
+              <p className="text-[10px] text-slate-500 leading-tight">N-Central WSDL → {langLabel} REST</p>
             </div>
           </div>
 
@@ -103,6 +124,8 @@ export default function App() {
                 <span className="font-medium text-slate-300">{wsdlInfo.serviceName}</span>
                 <span className="text-slate-600">·</span>
                 <span>{wsdlInfo.operations.length} operations</span>
+                <span className="text-slate-600">·</span>
+                <span className="text-violet-400">{langLabel}</span>
               </div>
             )}
 
@@ -166,6 +189,9 @@ export default function App() {
 
           {!sidebarCollapsed && (
             <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-4">
+              {/* Language selector — always visible at top of sidebar */}
+              <LanguageSelector value={language} onChange={handleLanguageChange} />
+
               <WsdlUploader onParsed={handleWsdlParsed} />
 
               {wsdlInfo && (
@@ -198,14 +224,41 @@ export default function App() {
                 </h2>
                 <p className="text-slate-400 max-w-md">
                   Upload a WSDL file from the N-Central repository to list available
-                  operations, then generate Spring Boot REST API implementation files.
+                  operations, then generate a REST API implementation in{' '}
+                  <strong className="text-slate-300">Java (Spring Boot)</strong> or{' '}
+                  <strong className="text-slate-300">Python (FastAPI)</strong>.
                 </p>
               </div>
+
+              {/* Language pills in welcome */}
+              <div className="flex gap-3 flex-wrap justify-center">
+                {([
+                  { key: 'java' as Language, icon: '☕', title: 'Java / Spring Boot', desc: 'Spring Boot 3 · Lombok · Jakarta EE · Swagger' },
+                  { key: 'python' as Language, icon: '🐍', title: 'Python / FastAPI', desc: 'FastAPI · Pydantic v2 · zeep SOAP client' },
+                ]).map((l) => (
+                  <button
+                    key={l.key}
+                    onClick={() => setLanguage(l.key)}
+                    className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
+                      language === l.key
+                        ? 'bg-violet-600/20 border-violet-500/60 text-white'
+                        : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:border-slate-600'
+                    }`}
+                  >
+                    <span className="text-2xl">{l.icon}</span>
+                    <div>
+                      <p className="text-sm font-medium">{l.title}</p>
+                      <p className="text-xs text-slate-500">{l.desc}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl text-left">
                 {[
                   { icon: '📄', title: 'Upload WSDL', desc: 'Parse N-Central WSDL to extract all operations with request/response structures' },
-                  { icon: '⚡', title: 'Generate Code', desc: 'Create Controller, Service, Transformer, and DTO classes following api-service standards' },
-                  { icon: '🧪', title: 'Generate Tests', desc: 'Produce JUnit 5 unit tests and Robot Framework acceptance tests' },
+                  { icon: '⚡', title: 'Generate Code', desc: 'Create Controller, Service, Transformer, and DTO classes in Java or Python' },
+                  { icon: '🧪', title: 'Generate Tests', desc: 'Produce JUnit 5 / pytest unit tests and Robot Framework acceptance tests' },
                 ].map((item) => (
                   <div key={item.title} className="rounded-xl bg-slate-800/50 border border-slate-700/50 p-4">
                     <div className="text-2xl mb-2">{item.icon}</div>
@@ -225,6 +278,9 @@ export default function App() {
                   Choose one of the {wsdlInfo.operations.length} operations from the sidebar.
                 </p>
               </div>
+              <div className="text-xs text-slate-500 bg-slate-800/50 border border-slate-700/50 rounded-lg px-4 py-2">
+                Generating {langLabel} · {langDesc}
+              </div>
             </div>
           ) : (
             /* Operation detail + code generation */
@@ -236,7 +292,7 @@ export default function App() {
 
               {/* Implement REST API button */}
               {!isGenerated && (
-                <div className="flex justify-center">
+                <div className="flex flex-col items-center gap-2">
                   <button
                     onClick={handleGenerate}
                     disabled={stage === 'generating'}
@@ -245,7 +301,7 @@ export default function App() {
                     {stage === 'generating' ? (
                       <>
                         <Loader2 className="w-5 h-5 animate-spin" />
-                        Generating implementation…
+                        Generating {langLabel} implementation…
                       </>
                     ) : (
                       <>
@@ -254,6 +310,9 @@ export default function App() {
                       </>
                     )}
                   </button>
+                  <p className="text-xs text-slate-500">
+                    Will generate {langLabel} · {langDesc}
+                  </p>
                 </div>
               )}
 
@@ -265,6 +324,7 @@ export default function App() {
                     <h2 className="text-sm font-semibold text-white flex items-center gap-2">
                       <Zap className="w-4 h-4 text-violet-400" />
                       Generated Implementation
+                      <span className="text-xs text-slate-400 font-normal">({langLabel})</span>
                     </h2>
                     <button
                       onClick={handleGenerate}
@@ -277,7 +337,11 @@ export default function App() {
 
                   {/* Code viewer */}
                   <div className="rounded-xl bg-slate-800/50 border border-slate-700/50 p-5">
-                    <GeneratedCode files={files} operationName={selectedOp.name} />
+                    <GeneratedCode
+                      files={files}
+                      operationName={selectedOp.name}
+                      language={language}
+                    />
                   </div>
 
                   {/* Chat refinement */}
@@ -296,6 +360,7 @@ export default function App() {
                       files={files}
                       operationName={selectedOp.name}
                       apiKey={apiKey}
+                      language={language}
                       onMessagesChange={setChatMessages}
                       onFilesUpdate={handleFilesUpdate}
                       onSatisfied={() => setStage('satisfied')}
@@ -310,6 +375,7 @@ export default function App() {
                         operation={selectedOp}
                         files={files}
                         apiKey={apiKey}
+                        language={language}
                       />
                     </div>
                   ) : (

@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, Language } from '../types';
 
 let _client: OpenAI | null = null;
 
@@ -15,6 +15,7 @@ export interface RefineRequest {
   history: ChatMessage[];
   currentCode: Record<string, string>;
   operationName: string;
+  language: Language;
 }
 
 export interface RefineResult {
@@ -22,7 +23,7 @@ export interface RefineResult {
   updatedCode?: Record<string, string>;
 }
 
-const SYSTEM_PROMPT = `You are an expert Java Spring Boot developer specialising in REST API services that wrap
+const JAVA_SYSTEM_PROMPT = `You are an expert Java Spring Boot developer specialising in REST API services that wrap
 N-Central SOAP/WSDL operations. Your role is to help refine and improve generated Java code.
 
 When asked to improve code, return the improved file contents inside Markdown fenced code blocks with the file
@@ -43,10 +44,32 @@ Follow these standards:
 - Defensive null checks and proper error handling
 - SLF4J logging`;
 
+const PYTHON_SYSTEM_PROMPT = `You are an expert Python / FastAPI developer specialising in REST API services that wrap
+N-Central SOAP/WSDL operations. Your role is to help refine and improve generated Python code.
+
+When asked to improve code, return the improved file contents inside Markdown fenced code blocks with the file
+type tag. Use the following tags so the UI can parse them:
+- \`\`\`python:controller — for the FastAPI router
+- \`\`\`python:service — for the abstract service base class
+- \`\`\`python:serviceImpl — for the concrete service implementation
+- \`\`\`python:transformer — for the Transformer
+- \`\`\`python:requestDto — for the Pydantic request schema
+- \`\`\`python:responseDto — for the Pydantic response schema
+
+Only include files that changed. For explanations, use plain text outside the code blocks.
+Follow these standards:
+- FastAPI + Pydantic v2 BaseModel
+- Dependency injection via FastAPI Depends()
+- Python typing (Optional, list, etc.)
+- zeep for SOAP client
+- Standard logging module
+- Async endpoint handlers`;
+
 /** Parse the assistant reply and extract updated file content from tagged code blocks */
-function parseCodeBlocks(text: string): Record<string, string> {
+function parseCodeBlocks(text: string, lang: Language): Record<string, string> {
   const updates: Record<string, string> = {};
-  const regex = /```java:(\w+)\n([\s\S]*?)```/g;
+  const prefix = lang === 'java' ? 'java' : 'python';
+  const regex = new RegExp(`\`\`\`${prefix}:(\\w+)\\n([\\s\\S]*?)\`\`\``, 'g');
   let match: RegExpExecArray | null;
   while ((match = regex.exec(text)) !== null) {
     const [, tag, code] = match;
@@ -60,32 +83,34 @@ export async function refineWithAI(
   req: RefineRequest,
 ): Promise<RefineResult> {
   const client = getClient(apiKey);
+  const systemPrompt = req.language === 'java' ? JAVA_SYSTEM_PROMPT : PYTHON_SYSTEM_PROMPT;
+  const codeTag = req.language === 'java' ? 'java' : 'python';
 
-  const systemWithCode = `${SYSTEM_PROMPT}
+  const systemWithCode = `${systemPrompt}
 
 Current generated files for operation "${req.operationName}":
 
-\`\`\`java:controller
+\`\`\`${codeTag}:controller
 ${req.currentCode.controller ?? ''}
 \`\`\`
 
-\`\`\`java:service
+\`\`\`${codeTag}:service
 ${req.currentCode.serviceInterface ?? ''}
 \`\`\`
 
-\`\`\`java:serviceImpl
+\`\`\`${codeTag}:serviceImpl
 ${req.currentCode.serviceImpl ?? ''}
 \`\`\`
 
-\`\`\`java:transformer
+\`\`\`${codeTag}:transformer
 ${req.currentCode.transformer ?? ''}
 \`\`\`
 
-\`\`\`java:requestDto
+\`\`\`${codeTag}:requestDto
 ${req.currentCode.requestDto ?? ''}
 \`\`\`
 
-\`\`\`java:responseDto
+\`\`\`${codeTag}:responseDto
 ${req.currentCode.responseDto ?? ''}
 \`\`\``;
 
@@ -105,7 +130,7 @@ ${req.currentCode.responseDto ?? ''}
   });
 
   const assistantMessage = completion.choices[0]?.message?.content ?? '';
-  const updatedCode = parseCodeBlocks(assistantMessage);
+  const updatedCode = parseCodeBlocks(assistantMessage, req.language);
 
   return {
     assistantMessage,
@@ -117,18 +142,24 @@ export async function generateTestsWithAI(
   apiKey: string,
   operationName: string,
   currentCode: Record<string, string>,
+  language: Language,
 ): Promise<{ unitTests: string; robotTests: string }> {
   const client = getClient(apiKey);
+  const systemPrompt = language === 'java' ? JAVA_SYSTEM_PROMPT : PYTHON_SYSTEM_PROMPT;
+  const codeTag = language === 'java' ? 'java' : 'python';
+  const testFramework = language === 'java' ? 'JUnit 5 / Mockito' : 'pytest + unittest.mock';
 
-  const prompt = `Generate comprehensive unit tests and Robot Framework tests for the ${operationName} Spring Boot REST API.
+  const prompt = `Generate comprehensive unit tests and Robot Framework tests for the ${operationName} ${
+    language === 'java' ? 'Spring Boot' : 'FastAPI'
+  } REST API.
 
 Current implementation files:
 ${Object.entries(currentCode)
-  .map(([k, v]) => `### ${k}\n\`\`\`java\n${v}\n\`\`\``)
+  .map(([k, v]) => `### ${k}\n\`\`\`${codeTag}\n${v}\n\`\`\``)
   .join('\n\n')}
 
 Return:
-1. JUnit 5 / Mockito unit tests in a \`\`\`java:unitTests block
+1. ${testFramework} unit tests in a \`\`\`${codeTag}:unitTests block
 2. Robot Framework tests in a \`\`\`robot:robotTests block
 
 Follow the same code standards as the existing implementation.`;
@@ -136,7 +167,7 @@ Follow the same code standards as the existing implementation.`;
   const completion = await client.chat.completions.create({
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: systemPrompt },
       { role: 'user', content: prompt },
     ],
     temperature: 0.2,
@@ -144,11 +175,11 @@ Follow the same code standards as the existing implementation.`;
 
   const reply = completion.choices[0]?.message?.content ?? '';
 
-  const javaMatch = /```java:unitTests\n([\s\S]*?)```/.exec(reply);
+  const unitMatch = new RegExp(`\`\`\`${codeTag}:unitTests\\n([\\s\\S]*?)\`\`\``).exec(reply);
   const robotMatch = /```robot:robotTests\n([\s\S]*?)```/.exec(reply);
 
   return {
-    unitTests: javaMatch?.[1]?.trimEnd() ?? '',
+    unitTests: unitMatch?.[1]?.trimEnd() ?? '',
     robotTests: robotMatch?.[1]?.trimEnd() ?? '',
   };
 }
