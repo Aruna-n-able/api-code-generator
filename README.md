@@ -70,23 +70,34 @@ An AI-powered skill that detects, analyses, and provides remediation guidance fo
 
 ### Prerequisites
 
-- Python 3.10+
-- pip
+- **Python 3.10+** (Python 2 is not supported)
+
+Verify you have a compatible Python version before continuing:
+
+```bash
+python3 --version   # must print 3.10 or higher
+```
 
 ### 1. Clone and install dependencies
 
 ```bash
 git clone <repo-url>
 cd api-code-generator
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
+
+> **macOS / conda tip:** Always use `python3 -m pip install` rather than bare
+> `pip install` or `pip3 install`. The bare forms can silently install packages
+> into a *different* Python environment than the one that runs the script,
+> causing "module not found" errors at runtime even though the install appeared
+> to succeed.
 
 ### 2. Run the skill against the bundled fixture files
 
 The repo ships with two sample `output.xml` files that demonstrate flaky behaviour (some tests pass in one run and fail in the other).
 
 ```bash
-python run_flaky_analysis.py \
+python3 run_flaky_analysis.py \
     --robot-output tests/fixtures/sample_output.xml \
                    tests/fixtures/sample_output_run2.xml \
     --no-ai
@@ -97,7 +108,7 @@ You will see a Markdown report printed to stdout listing flaky tests, their metr
 ### 3. Save the report to a file
 
 ```bash
-python run_flaky_analysis.py \
+python3 run_flaky_analysis.py \
     --robot-output tests/fixtures/sample_output.xml \
                    tests/fixtures/sample_output_run2.xml \
     --no-ai \
@@ -111,7 +122,7 @@ Set your Anthropic API key and run without `--no-ai`:
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-python run_flaky_analysis.py \
+python3 run_flaky_analysis.py \
     --robot-output tests/fixtures/sample_output.xml \
                    tests/fixtures/sample_output_run2.xml
 ```
@@ -121,7 +132,7 @@ python run_flaky_analysis.py \
 Collect `output.xml` files from several CI runs of the same suite, then pass them all at once. The more runs you provide, the more accurate the flakiness detection:
 
 ```bash
-python run_flaky_analysis.py \
+python3 run_flaky_analysis.py \
     --robot-output ci/run1/output.xml ci/run2/output.xml ci/run3/output.xml \
     --no-ai \
     --output-file report.md
@@ -150,19 +161,19 @@ export JIRA_USER_EMAIL="your-email@n-able.com"
 export JIRA_API_TOKEN="<your-atlassian-api-token>"
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-python run_flaky_analysis.py --jira-ticket NCCF-1593628
+python3 run_flaky_analysis.py --jira-ticket NCCF-1593628
 ```
 
 ### Dry-run (no Jira write, print to stdout only)
 
 ```bash
-python run_flaky_analysis.py --jira-ticket NCCF-1593628 --no-post
+python3 run_flaky_analysis.py --jira-ticket NCCF-1593628 --no-post
 ```
 
 ### Offline (no AI, no Jira write)
 
 ```bash
-python run_flaky_analysis.py --jira-ticket NCCF-1593628 --no-ai --no-post
+python3 run_flaky_analysis.py --jira-ticket NCCF-1593628 --no-ai --no-post
 ```
 
 ---
@@ -283,7 +294,7 @@ export JIRA_BASE_URL="https://myorg.atlassian.net"
 export JIRA_USER_EMAIL="ci-bot@myorg.com"
 export JIRA_API_TOKEN="<your-api-token>"
 
-python run_flaky_analysis.py \
+python3 run_flaky_analysis.py \
     --robot-output output.xml \
     --jira-issue QA-123 \
     --no-ai
@@ -315,8 +326,8 @@ pipeline {
     }
     failure {
       sh '''
-        pip install -r requirements.txt -q
-        python run_flaky_analysis.py \
+        python3 -m pip install -r requirements.txt -q
+        python3 run_flaky_analysis.py \
           --robot-output output.xml \
           --no-ai \
           --output-file flaky_report.md || true
@@ -324,7 +335,7 @@ pipeline {
       archiveArtifacts artifacts: 'flaky_report.md'
     }
     unstable {
-      sh 'python run_flaky_analysis.py --robot-output output.xml --no-ai || true'
+      sh 'python3 run_flaky_analysis.py --robot-output output.xml --no-ai || true'
     }
   }
 }
