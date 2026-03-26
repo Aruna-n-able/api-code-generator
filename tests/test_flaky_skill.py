@@ -778,3 +778,111 @@ class TestCLIJiraTicketMode:
         err = capsys.readouterr().err
         assert "Connection refused" in err
         assert "Traceback" not in err
+
+    def test_unexpected_error_shows_no_ai_tip(self, capsys):
+        """Generic exceptions from analyze_ticket should suggest --no-ai."""
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.side_effect = Exception("boom")
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1", "--no-post"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "--no-ai" in err
+
+
+# ===========================================================================
+# Anthropic API error handling
+# ===========================================================================
+
+class TestAnthropicErrorHandling:
+    """_generate_ai_summary and _generate_root_cause_analysis must handle
+    Anthropic API errors gracefully instead of propagating them to callers."""
+
+    def _make_api_status_error(self, status_code: int, message: str):
+        """Build a minimal fake that quacks like anthropic.APIStatusError."""
+        exc = Exception(f"Error code: {status_code} - {message}")
+        exc.status_code = status_code
+        return exc
+
+    def test_ai_summary_returns_empty_string_on_billing_error(self, caplog):
+        """A 400 credit-balance error must be caught; the method returns ''."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        billing_exc = self._make_api_status_error(
+            400,
+            "Your credit balance is too low to access the Anthropic API."
+        )
+
+        # Simulate anthropic being available with a fake module object
+        fake_anthropic = MagicMock()
+        fake_anthropic.APIStatusError = type(billing_exc)
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = billing_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="fake-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            from skills.flaky_test_analysis.metrics import TestMetrics
+            metric = MagicMock(spec=TestMetrics)
+            metric.flakiness_score = "High"
+            metric.name = "test_foo"
+            metric.failure_rate_display = "50%"
+
+            result = skill._generate_ai_summary([metric], {})
+
+        assert result == ""
+
+    def test_root_cause_returns_empty_tuple_on_billing_error(self, caplog):
+        """A 400 credit-balance error in _generate_root_cause_analysis must be
+        caught and return ('', '')."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        billing_exc = self._make_api_status_error(
+            400,
+            "Your credit balance is too low to access the Anthropic API."
+        )
+
+        fake_anthropic = MagicMock()
+        fake_anthropic.APIStatusError = type(billing_exc)
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = billing_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="fake-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result == ("", "")
+
+    def test_auth_error_returns_empty_string(self, caplog):
+        """A 401 authentication error must also be handled gracefully."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        auth_exc = self._make_api_status_error(401, "Invalid API key")
+
+        fake_anthropic = MagicMock()
+        fake_anthropic.APIStatusError = type(auth_exc)
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = auth_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="bad-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result == ("", "")

@@ -52,6 +52,31 @@ except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
 
+def _handle_anthropic_error(exc: Exception) -> None:
+    """Log a clear, actionable message for an Anthropic API error."""
+    msg = str(exc)
+    status = getattr(exc, "status_code", None)
+    if "credit balance is too low" in msg:
+        logger.error(
+            "Anthropic API error: your credit balance is too low.\n"
+            "  → Top up your account at https://console.anthropic.com/settings/billing\n"
+            "  → Or re-run with --no-ai to skip the AI step and still get the "
+            "pattern-based analysis."
+        )
+    elif status == 401 or "authentication" in msg.lower() or "api_key" in msg.lower():
+        logger.error(
+            "Anthropic API authentication failed – verify ANTHROPIC_API_KEY is correct.\n"
+            "  → Re-run with --no-ai to skip the AI step."
+        )
+    else:
+        logger.warning(
+            "Claude API error (HTTP %s): %s\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            status or "?",
+            exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -276,13 +301,17 @@ class FlakyTestAnalysisSkill:
                 patterns = ", ".join(r.pattern_name for r in recs)
                 prompt_lines.append(f"  Patterns: {patterns}")
 
-        client = _anthropic.Anthropic(api_key=self._api_key)
-        message = client.messages.create(
-            model=self._model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
-        )
-        return message.content[0].text if message.content else ""
+        try:
+            client = _anthropic.Anthropic(api_key=self._api_key)
+            message = client.messages.create(
+                model=self._model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
+            )
+            return message.content[0].text if message.content else ""
+        except _anthropic.APIStatusError as exc:
+            _handle_anthropic_error(exc)
+            return ""
 
     # ------------------------------------------------------------------
     # Report formatting
@@ -704,14 +733,18 @@ class FlakyTestAnalysisSkill:
 
         prompt = "\n".join(prompt_lines)
 
-        client = _anthropic.Anthropic(api_key=self._api_key)
-        message = client.messages.create(
-            model=self._model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            client = _anthropic.Anthropic(api_key=self._api_key)
+            message = client.messages.create(
+                model=self._model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-        full_response = message.content[0].text if message.content else ""
+            full_response = message.content[0].text if message.content else ""
+        except _anthropic.APIStatusError as exc:
+            _handle_anthropic_error(exc)
+            return "", ""
 
         # Split the response into root cause / solution sections
         root_cause, recommended_solution = self._parse_ai_response(full_response)

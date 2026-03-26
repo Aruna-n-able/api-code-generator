@@ -260,6 +260,10 @@ def main(argv=None):
             sys.exit(1)
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR: Unexpected failure analysing ticket {args.jira_ticket}: {exc}", file=sys.stderr)
+            print(
+                "Tip: if the error is AI-related, re-run with --no-ai to skip the Claude step.",
+                file=sys.stderr,
+            )
             if args.verbose:
                 import traceback
                 traceback.print_exc()
