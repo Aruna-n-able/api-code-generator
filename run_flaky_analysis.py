@@ -71,8 +71,14 @@ try:
 except ImportError as _import_exc:
     print(
         f"ERROR: A required dependency is missing: {_import_exc}\n"
-        "\nInstall all dependencies with:\n"
-        "  pip install -r requirements.txt",
+        "\nInstall dependencies using the SAME Python that runs this script:\n"
+        "  python -m pip install -r requirements.txt\n"
+        "\nUsing 'pip' or 'pip3' directly can install into a different Python\n"
+        "environment (e.g. a different conda env or system Python) and will not\n"
+        "be visible to the interpreter running this script.\n"
+        "If you use conda, activate the target environment first:\n"
+        "  conda activate <your-env>\n"
+        "  python -m pip install -r requirements.txt",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -203,8 +209,14 @@ def main(argv=None):
         # instantiation time (e.g. pyyaml, imported inside PatternDatabase).
         print(
             f"ERROR: A required dependency is missing: {exc}\n"
-            "\nInstall all dependencies with:\n"
-            "  pip install -r requirements.txt",
+            "\nInstall dependencies using the SAME Python that runs this script:\n"
+            "  python -m pip install -r requirements.txt\n"
+            "\nUsing 'pip' or 'pip3' directly can install into a different Python\n"
+            "environment (e.g. a different conda env or system Python) and will not\n"
+            "be visible to the interpreter running this script.\n"
+            "If you use conda, activate the target environment first:\n"
+            "  conda activate <your-env>\n"
+            "  python -m pip install -r requirements.txt",
             file=sys.stderr,
         )
         sys.exit(1)
