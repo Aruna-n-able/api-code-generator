@@ -62,7 +62,20 @@ from pathlib import Path
 # Allow running as a top-level script without installing the package
 sys.path.insert(0, str(Path(__file__).parent))
 
-from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+try:
+    # Catches hard import failures (e.g. a missing package that is imported at
+    # module level).  Lazy-loaded dependencies (e.g. pyyaml, which is only
+    # loaded when PatternDatabase is instantiated) are caught later during
+    # skill construction.
+    from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+except ImportError as _import_exc:
+    print(
+        f"ERROR: A required dependency is missing: {_import_exc}\n"
+        "\nInstall all dependencies with:\n"
+        "  pip install -r requirements.txt",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def parse_args(argv=None):
@@ -180,10 +193,21 @@ def main(argv=None):
         )
         sys.exit(1)
 
-    skill = FlakyTestAnalysisSkill(
-        claude_model=args.model,
-        patterns_file=args.patterns_file,
-    )
+    try:
+        skill = FlakyTestAnalysisSkill(
+            claude_model=args.model,
+            patterns_file=args.patterns_file,
+        )
+    except ImportError as exc:
+        # Catches lazy-loaded dependencies that are only resolved at
+        # instantiation time (e.g. pyyaml, imported inside PatternDatabase).
+        print(
+            f"ERROR: A required dependency is missing: {exc}\n"
+            "\nInstall all dependencies with:\n"
+            "  pip install -r requirements.txt",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # ----------------------------------------------------------------
     # Mode 2 – Jira ticket-driven analysis

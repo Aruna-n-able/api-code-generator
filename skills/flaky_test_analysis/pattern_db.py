@@ -11,7 +11,11 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import yaml
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
 
 from .robot_parser import TestResult
 
@@ -97,6 +101,8 @@ class PatternDatabase:
 
     @staticmethod
     def _load(path: Path) -> List[Pattern]:
+        if not _YAML_AVAILABLE:
+            raise ImportError("No module named 'yaml' (pyyaml)")
         with path.open(encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
+            data = _yaml.safe_load(fh)
         return [Pattern(entry) for entry in data.get("patterns", [])]
