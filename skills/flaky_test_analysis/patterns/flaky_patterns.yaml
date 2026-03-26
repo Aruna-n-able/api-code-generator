@@ -1,0 +1,323 @@
+---
+# Flaky Test Pattern Knowledge Base
+# Each entry defines a known flaky pattern with detection signals and remediation guidance.
+
+patterns:
+
+  - id: datetime_timing
+    name: "Datetime / Timing Issue"
+    description: >
+      Test relies on the real system clock or wall-clock time without freezing
+      or mocking it. Results vary depending on when the test runs.
+    keywords:
+      - datetime.now
+      - time.time
+      - time.sleep
+      - sleep
+      - timeout
+      - expired
+      - session_timeout
+      - token_expired
+      - timestamp
+      - utcnow
+      - date.today
+    robot_keywords:
+      - Sleep
+      - Get Time
+      - Get Current Date
+    error_patterns:
+      - "AssertionError.*timeout"
+      - "AssertionError.*expired"
+      - "AssertionError.*timestamp"
+      - "TimeoutError"
+    fix_template: |
+      Use `freezegun` to freeze time during the test:
+
+      ```python
+      from freezegun import freeze_time
+
+      @freeze_time("2024-01-01 10:00:00")
+      def test_user_session_timeout():
+          # your test body here
+          ...
+      ```
+
+      In Robot Framework, replace real `Sleep` calls with a mock or use
+      FakeLibrary for time control.
+    severity_weight: 2
+
+  - id: database_state
+    name: "Database State Contamination"
+    description: >
+      Tests share mutable database state and do not clean up after themselves,
+      causing order-dependent failures.
+    keywords:
+      - database
+      - db
+      - sql
+      - query
+      - insert
+      - delete
+      - commit
+      - rollback
+      - fixture
+      - setup
+      - teardown
+    robot_keywords:
+      - Connect To Database
+      - Execute Sql String
+      - Disconnect From Database
+    error_patterns:
+      - "IntegrityError"
+      - "UniqueViolation"
+      - "duplicate key"
+      - "foreign key"
+      - "DoesNotExist"
+      - "MultipleObjectsReturned"
+    fix_template: |
+      Wrap each test in a database transaction that is rolled back after the
+      test completes:
+
+      ```python
+      import pytest
+
+      @pytest.fixture(autouse=True)
+      def rollback_transaction(db):
+          with db.transaction():
+              yield
+              db.rollback()
+      ```
+
+      Or use Django's `TestCase` which wraps each test in a transaction
+      automatically. Ensure Robot Framework suites have a `Suite Teardown`
+      that truncates or resets relevant tables.
+    severity_weight: 3
+
+  - id: test_order_dependency
+    name: "Test Order Dependency"
+    description: >
+      A test implicitly relies on state produced by a previously executed test.
+      Randomising the test execution order reveals the dependency.
+    keywords:
+      - global
+      - shared_state
+      - module_level
+      - class_variable
+    error_patterns:
+      - "AttributeError"
+      - "NameError"
+      - "KeyError"
+      - "NoneType.*has no attribute"
+    fix_template: |
+      Ensure every test sets up its own preconditions in a `setup` / `setUp`
+      method or a pytest fixture:
+
+      ```python
+      @pytest.fixture
+      def user(db):
+          return User.objects.create(username="testuser", email="test@example.com")
+
+      def test_profile_update(user):
+          user.profile.bio = "Hello"
+          user.profile.save()
+          assert user.profile.bio == "Hello"
+      ```
+    severity_weight: 3
+
+  - id: random_data
+    name: "Random Data Without Fixed Seed"
+    description: >
+      The test generates random data without a fixed seed, so assertions may
+      pass on some runs and fail on others.
+    keywords:
+      - random
+      - randint
+      - choice
+      - shuffle
+      - uuid
+      - faker
+      - factory_boy
+    error_patterns:
+      - "AssertionError"
+    fix_template: |
+      Set a fixed seed before generating random data:
+
+      ```python
+      import random
+
+      random.seed(42)
+      value = random.randint(1, 100)
+      ```
+
+      When using Faker, pass a `seed` to the factory:
+
+      ```python
+      from faker import Faker
+      fake = Faker()
+      Faker.seed(0)
+      ```
+    severity_weight: 1
+
+  - id: unmocked_external_api
+    name: "Unmocked External API"
+    description: >
+      The test calls a real external service whose availability or response may
+      vary, causing non-deterministic failures.
+    keywords:
+      - requests
+      - urllib
+      - httpx
+      - aiohttp
+      - boto3
+      - stripe
+      - sendgrid
+      - twilio
+      - http
+      - api_call
+      - endpoint
+    robot_keywords:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - RequestsLibrary
+    error_patterns:
+      - "ConnectionError"
+      - "Timeout"
+      - "SSLError"
+      - "requests.exceptions"
+      - "HTTPError"
+      - "404"
+      - "500"
+      - "503"
+    fix_template: |
+      Mock the external call using `unittest.mock` or `responses`:
+
+      ```python
+      import responses
+      import requests
+
+      @responses.activate
+      def test_external_api():
+          responses.add(
+              responses.GET,
+              "https://api.example.com/data",
+              json={"key": "value"},
+              status=200,
+          )
+          result = requests.get("https://api.example.com/data")
+          assert result.json() == {"key": "value"}
+      ```
+
+      In Robot Framework, use MockServer or RequestsLibrary's
+      `Mock Requests` keyword.
+    severity_weight: 3
+
+  - id: robot_context_mismanagement
+    name: "Robot Framework Resource / Library Context Mismanagement"
+    description: >
+      Robot Framework keywords share library instances across tests without
+      resetting state, or resources are not imported with the correct scope.
+    keywords:
+      - Library
+      - Resource
+      - WITH NAME
+      - scope
+      - GLOBAL
+      - SUITE
+      - TEST
+    robot_keywords:
+      - Import Library
+      - Import Resource
+    error_patterns:
+      - "No keyword with name"
+      - "Library.*already imported"
+      - "Variable.*not found"
+      - "AttributeError.*library"
+    fix_template: |
+      Declare libraries with the correct scope in your `.robot` file:
+
+      ```robot
+      *** Settings ***
+      Library    MyLibrary    WITH NAME    MyLib    scope=TEST
+      ```
+
+      Use `Suite Setup` / `Suite Teardown` for suite-level resources and
+      `Test Setup` / `Test Teardown` for test-level state so that each test
+      starts with a clean context.
+    severity_weight: 2
+
+  - id: race_condition
+    name: "Race Condition"
+    description: >
+      Concurrent code has a race condition that manifests as intermittent
+      assertion failures or deadlocks.
+    keywords:
+      - thread
+      - threading
+      - asyncio
+      - async
+      - await
+      - concurrent
+      - multiprocessing
+      - lock
+      - semaphore
+      - queue
+    error_patterns:
+      - "AssertionError"
+      - "DeadlockError"
+      - "RuntimeError.*coroutine"
+      - "asyncio.*timeout"
+    fix_template: |
+      Use proper synchronisation primitives and avoid shared mutable state:
+
+      ```python
+      import threading
+
+      lock = threading.Lock()
+
+      def increment(counter):
+          with lock:
+              counter["value"] += 1
+      ```
+
+      For async code, prefer `asyncio.gather` with cancellation handling and
+      use `asyncio.timeout` (Python 3.11+) instead of ad-hoc sleep loops.
+    severity_weight: 3
+
+  - id: flask_context
+    name: "Flask Application Context Mismanagement"
+    description: >
+      Tests access Flask `g`, `current_app`, or `request` outside an active
+      application context, causing `RuntimeError: No application is running`.
+    keywords:
+      - flask
+      - current_app
+      - app_context
+      - request_context
+      - g.
+      - url_for
+    error_patterns:
+      - "RuntimeError.*application"
+      - "RuntimeError.*context"
+      - "No application is running"
+      - "Working outside of application context"
+    fix_template: |
+      Use a pytest fixture that pushes an application context for the
+      duration of each test:
+
+      ```python
+      import pytest
+      from myapp import create_app
+
+      @pytest.fixture
+      def app():
+          app = create_app({"TESTING": True})
+          with app.app_context():
+              yield app
+
+      @pytest.fixture
+      def client(app):
+          return app.test_client()
+      ```
+    severity_weight: 2

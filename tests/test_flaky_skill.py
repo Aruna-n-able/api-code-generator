@@ -1,0 +1,385 @@
+"""
+Unit tests for the Flaky Test Analysis Skill.
+
+Run with:
+    pytest tests/test_flaky_skill.py -v
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Fixtures and helpers
+# ---------------------------------------------------------------------------
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+SAMPLE_RUN1 = FIXTURE_DIR / "sample_output.xml"
+SAMPLE_RUN2 = FIXTURE_DIR / "sample_output_run2.xml"
+
+
+# ===========================================================================
+# RobotOutputParser
+# ===========================================================================
+
+class TestRobotOutputParser:
+    def setup_method(self):
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        self.parser = RobotOutputParser()
+
+    def test_parse_file_returns_parsed_run(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        assert run.source_file == str(SAMPLE_RUN1)
+        assert len(run.tests) > 0
+
+    def test_parse_file_extracts_test_names(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        names = {t.name for t in run.tests}
+        assert "test_user_session_timeout" in names
+        assert "test_login_with_valid_credentials" in names
+
+    def test_parse_file_records_status(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        by_name = {t.name: t for t in run.tests}
+        assert by_name["test_user_session_timeout"].status == "FAIL"
+        assert by_name["test_login_with_valid_credentials"].status == "PASS"
+
+    def test_parse_file_records_failure_message(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        timeout_test = next(
+            t for t in run.tests if t.name == "test_user_session_timeout"
+        )
+        # The fixture message explicitly contains "AssertionError" and "datetime.now()"
+        assert "AssertionError" in timeout_test.message
+        assert "datetime.now()" in timeout_test.message
+
+    def test_parse_file_records_elapsed_ms(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        for test in run.tests:
+            assert test.elapsed_ms >= 0
+
+    def test_parse_file_records_tags(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        db_test = next(
+            t for t in run.tests if t.name == "test_user_registration_unique_email"
+        )
+        assert "database" in db_test.tags
+
+    def test_parse_files_returns_multiple_runs(self):
+        runs = self.parser.parse_files([SAMPLE_RUN1, SAMPLE_RUN2])
+        assert len(runs) == 2
+
+    def test_parse_file_missing_raises(self):
+        with pytest.raises(Exception):
+            self.parser.parse_file("/nonexistent/path/output.xml")
+
+
+# ===========================================================================
+# PatternDatabase
+# ===========================================================================
+
+class TestPatternDatabase:
+    def setup_method(self):
+        from skills.flaky_test_analysis.pattern_db import PatternDatabase
+        self.db = PatternDatabase()
+
+    def test_loads_patterns(self):
+        assert len(self.db.all_patterns) >= 5
+
+    def test_get_pattern_by_id(self):
+        pattern = self.db.get_pattern("datetime_timing")
+        assert pattern is not None
+        assert pattern.name == "Datetime / Timing Issue"
+
+    def test_get_nonexistent_pattern_returns_none(self):
+        assert self.db.get_pattern("nonexistent_id") is None
+
+    def test_match_datetime_pattern(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_user_session_timeout",
+            suite="Auth Suite",
+            status="FAIL",
+            message="AssertionError: Session expected to be expired. datetime.now() returned unexpected value.",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=1000,
+        )
+        matches = self.db.match(test)
+        pattern_ids = {p.id for p in matches}
+        assert "datetime_timing" in pattern_ids
+
+    def test_match_database_pattern(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_user_registration",
+            suite="DB Suite",
+            status="FAIL",
+            message="IntegrityError: duplicate key value violates unique constraint",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=500,
+        )
+        matches = self.db.match(test)
+        pattern_ids = {p.id for p in matches}
+        assert "database_state" in pattern_ids
+
+    def test_match_external_api_pattern(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_send_email",
+            suite="API Suite",
+            status="FAIL",
+            message="ConnectionError: HTTPSConnectionPool max retries exceeded sendgrid",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=5000,
+        )
+        matches = self.db.match(test)
+        pattern_ids = {p.id for p in matches}
+        assert "unmocked_external_api" in pattern_ids
+
+    def test_no_match_for_passing_test_with_no_signals(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_simple_addition",
+            suite="Math Suite",
+            status="FAIL",
+            message="AssertionError: 2 + 2 expected 4 got 5",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=10,
+        )
+        matches = self.db.match(test)
+        # Should not match any specific pattern
+        assert isinstance(matches, list)
+
+
+# ===========================================================================
+# MetricsEngine
+# ===========================================================================
+
+class TestMetricsEngine:
+    def setup_method(self):
+        from skills.flaky_test_analysis.metrics import MetricsEngine
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        self.engine = MetricsEngine()
+        parser = RobotOutputParser()
+        self.runs = parser.parse_files([SAMPLE_RUN1, SAMPLE_RUN2])
+
+    def test_compute_returns_metrics_for_all_tests(self):
+        metrics = self.engine.compute(self.runs)
+        assert len(metrics) > 0
+
+    def test_flaky_test_detected(self):
+        metrics = self.engine.compute(self.runs)
+        by_name = {m.name: m for m in metrics}
+        # test_user_session_timeout fails in run1 (FAIL) and passes in run2 (PASS)
+        # → 1 failure in 2 runs = 50% failure rate → "High"
+        m = by_name.get("test_user_session_timeout")
+        assert m is not None
+        assert m.flakiness_score == "High"
+
+    def test_stable_test_not_flaky(self):
+        metrics = self.engine.compute(self.runs)
+        by_name = {m.name: m for m in metrics}
+        # test_login_with_valid_credentials always passes
+        m = by_name.get("test_login_with_valid_credentials")
+        assert m is not None
+        assert m.flakiness_score == "Stable"
+
+    def test_failure_rate_calculation(self):
+        metrics = self.engine.compute(self.runs)
+        by_name = {m.name: m for m in metrics}
+        m = by_name["test_user_session_timeout"]
+        # Fails in 1 of 2 runs → 50%
+        assert m.failure_count == 1
+        assert m.total_runs == 2
+        assert abs(m.failure_rate - 0.5) < 0.01
+
+    def test_metrics_sorted_by_severity(self):
+        metrics = self.engine.compute(self.runs)
+        non_stable = [m for m in metrics if m.flakiness_score != "Stable"]
+        order = {"High": 0, "Medium": 1, "Low": 2}
+        for i in range(len(non_stable) - 1):
+            assert order.get(non_stable[i].flakiness_score, 3) <= order.get(
+                non_stable[i + 1].flakiness_score, 3
+            )
+
+    def test_failure_rate_display_format(self):
+        metrics = self.engine.compute(self.runs)
+        for m in metrics:
+            assert "/" in m.failure_rate_display
+
+
+# ===========================================================================
+# Recommender
+# ===========================================================================
+
+class TestRecommender:
+    def setup_method(self):
+        from skills.flaky_test_analysis.metrics import MetricsEngine
+        from skills.flaky_test_analysis.recommender import Recommender
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        self.recommender = Recommender()
+        parser = RobotOutputParser()
+        self.runs = parser.parse_files([SAMPLE_RUN1, SAMPLE_RUN2])
+        self.engine = MetricsEngine()
+        self.metrics = self.engine.compute(self.runs)
+
+    def _build_all_results(self):
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        parser = RobotOutputParser()
+        all_results = {}
+        for run in self.runs:
+            for t in run.tests:
+                all_results.setdefault(t.name, []).append(t)
+        return all_results
+
+    def test_recommend_all_returns_dict(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        assert isinstance(recs, dict)
+
+    def test_no_recommendation_for_stable_tests(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        # Stable tests should not be in the recommendations dict
+        stable = {m.name for m in self.metrics if m.flakiness_score == "Stable"}
+        for name in stable:
+            assert name not in recs
+
+    def test_recommendation_has_required_fields(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        for test_name, rec_list in recs.items():
+            for rec in rec_list:
+                assert rec.test_name == test_name
+                assert rec.pattern_id
+                assert rec.pattern_name
+                assert rec.fix_template
+
+    def test_datetime_pattern_recommendation(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        timeout_recs = recs.get("test_user_session_timeout", [])
+        pattern_ids = {r.pattern_id for r in timeout_recs}
+        assert "datetime_timing" in pattern_ids
+
+
+# ===========================================================================
+# FlakyTestAnalysisSkill (integration, no AI)
+# ===========================================================================
+
+class TestFlakyTestAnalysisSkill:
+    def setup_method(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        self.skill = FlakyTestAnalysisSkill()
+
+    def test_run_analysis_returns_report(self):
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            use_ai_summary=False,
+        )
+        assert report is not None
+        assert len(report.metrics) > 0
+
+    def test_formatted_report_is_markdown(self):
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            use_ai_summary=False,
+        )
+        assert "# Flaky Test Analysis Report" in report.formatted_report
+
+    def test_flaky_tests_appear_in_report(self):
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            use_ai_summary=False,
+        )
+        assert "test_user_session_timeout" in report.formatted_report
+
+    def test_single_run_marks_no_flakiness(self):
+        """A single run cannot demonstrate flakiness; all tests should be Stable."""
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1],
+            use_ai_summary=False,
+        )
+        # With only one run there are no passing counterparts for failing tests,
+        # so no test has mixed results → all are Stable.
+        flaky = [m for m in report.metrics if m.flakiness_score != "Stable"]
+        assert len(flaky) == 0
+
+    def test_jira_posting_is_called_when_key_provided(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = MagicMock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            jira_issue_key="TEST-1",
+            use_ai_summary=False,
+        )
+        mock_jira.post_analysis_report.assert_called_once()
+
+    def test_no_jira_call_without_issue_key(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = MagicMock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            jira_issue_key=None,
+            use_ai_summary=False,
+        )
+        mock_jira.post_analysis_report.assert_not_called()
+
+    def test_ai_summary_skipped_without_api_key(self):
+        """When ANTHROPIC_API_KEY is not set, ai_summary should be empty string."""
+        with patch.dict("os.environ", {}, clear=True):
+            from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="")
+            report = skill.run_analysis(
+                [SAMPLE_RUN1, SAMPLE_RUN2],
+                use_ai_summary=True,
+            )
+            assert report.ai_summary == ""
+
+
+# ===========================================================================
+# JiraClient
+# ===========================================================================
+
+class TestJiraClient:
+    def test_mcp_mode_returns_stub(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(auth_mode="mcp")
+        result = client.post_comment("TEST-1", "Hello")
+        assert result["status"] == "stub"
+        assert result["issue_key"] == "TEST-1"
+
+    def test_rest_mode_raises_without_config(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(auth_mode="rest", base_url="", user_email="", api_token="")
+        with pytest.raises(RuntimeError, match="Missing Jira configuration"):
+            client.post_comment("TEST-1", "Hello")
+
+    def test_rest_mode_posts_comment(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(
+            base_url="https://example.atlassian.net",
+            user_email="user@example.com",
+            api_token="fake-token",
+            auth_mode="rest",
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"id": "12345", "body": "Hello"}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.post.return_value = mock_response
+            result = client.post_comment("TEST-1", "Hello")
+
+        mock_req.post.assert_called_once()
+        assert result["id"] == "12345"

@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Second run fixture: some previously failing tests now pass, creating flaky patterns.
+-->
+<robot generator="Robot 6.1.1" generated="20240121 09:00:00.000" rpa="false" schemaversion="4">
+  <suite id="s1" name="User Management Suite" source="/tests/user_management">
+    <suite id="s1-s1" name="Authentication Tests" source="/tests/user_management/auth_tests.robot">
+
+      <!-- test_user_session_timeout now PASSES (timing flakiness) -->
+      <test id="s1-s1-t1" name="test_user_session_timeout">
+        <tag>authentication</tag>
+        <tag>timing</tag>
+        <status status="PASS" starttime="20240121 09:01:00.000" endtime="20240121 09:01:02.100">
+        </status>
+      </test>
+
+      <test id="s1-s1-t2" name="test_login_with_valid_credentials">
+        <tag>authentication</tag>
+        <status status="PASS" starttime="20240121 09:01:03.000" endtime="20240121 09:01:03.460">
+        </status>
+      </test>
+
+      <!-- test_user_registration_unique_email still FAILS -->
+      <test id="s1-s1-t3" name="test_user_registration_unique_email">
+        <tag>database</tag>
+        <tag>registration</tag>
+        <status status="FAIL" starttime="20240121 09:01:04.000" endtime="20240121 09:01:04.950">
+          IntegrityError: duplicate key value violates unique constraint "users_email_key".
+        </status>
+      </test>
+
+      <test id="s1-s1-t4" name="test_logout_clears_session">
+        <tag>authentication</tag>
+        <status status="PASS" starttime="20240121 09:01:05.000" endtime="20240121 09:01:05.200">
+        </status>
+      </test>
+
+    </suite>
+
+    <suite id="s1-s2" name="API Integration Tests" source="/tests/user_management/api_tests.robot">
+
+      <!-- test_send_welcome_email now PASSES -->
+      <test id="s1-s2-t1" name="test_send_welcome_email">
+        <tag>email</tag>
+        <tag>external_api</tag>
+        <status status="PASS" starttime="20240121 09:02:00.000" endtime="20240121 09:02:01.010">
+        </status>
+      </test>
+
+      <test id="s1-s2-t2" name="test_fetch_user_profile">
+        <tag>api</tag>
+        <status status="PASS" starttime="20240121 09:02:02.000" endtime="20240121 09:02:02.340">
+        </status>
+      </test>
+
+      <!-- test_generate_unique_referral_code PASSES this run -->
+      <test id="s1-s2-t3" name="test_generate_unique_referral_code">
+        <tag>random</tag>
+        <status status="PASS" starttime="20240121 09:02:03.000" endtime="20240121 09:02:03.200">
+        </status>
+      </test>
+
+    </suite>
+
+    <suite id="s1-s3" name="Concurrent Processing Tests" source="/tests/user_management/concurrent_tests.robot">
+
+      <!-- test_concurrent_balance_update PASSES this run -->
+      <test id="s1-s3-t1" name="test_concurrent_balance_update">
+        <tag>concurrency</tag>
+        <tag>threading</tag>
+        <status status="PASS" starttime="20240121 09:03:00.000" endtime="20240121 09:03:00.950">
+        </status>
+      </test>
+
+      <test id="s1-s3-t2" name="test_sequential_order_processing">
+        <tag>processing</tag>
+        <status status="PASS" starttime="20240121 09:03:01.000" endtime="20240121 09:03:01.300">
+        </status>
+      </test>
+
+    </suite>
+
+    <status status="FAIL" starttime="20240121 09:00:00.000" endtime="20240121 09:03:02.000"/>
+  </suite>
+  <statistics>
+    <total>
+      <stat pass="8" fail="1" skip="0">All Tests</stat>
+    </total>
+    <tag>
+      <stat pass="3" fail="0" skip="0">authentication</stat>
+      <stat pass="1" fail="0" skip="0">concurrency</stat>
+      <stat pass="0" fail="1" skip="0">database</stat>
+      <stat pass="1" fail="0" skip="0">email</stat>
+      <stat pass="1" fail="0" skip="0">external_api</stat>
+      <stat pass="1" fail="0" skip="0">random</stat>
+      <stat pass="1" fail="0" skip="0">threading</stat>
+    </tag>
+    <suite>
+      <stat pass="8" fail="1" skip="0" id="s1" name="User Management Suite">User Management Suite</stat>
+    </suite>
+  </statistics>
+  <errors/>
+</robot>
