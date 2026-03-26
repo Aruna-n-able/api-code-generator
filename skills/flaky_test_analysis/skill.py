@@ -7,21 +7,35 @@ This module is the top-level orchestrator.  It wires together:
   3. PatternDatabase    – match known flaky patterns
   4. Recommender        – generate code-level fix suggestions
   5. Claude AI          – produce a natural-language summary (optional)
-  6. JiraClient         – post the report to a Jira issue (optional)
+  6. JiraClient         – fetch ticket / attachments and post the report
 
 The skill can be used:
   a. Programmatically via the FlakyTestAnalysisSkill class.
   b. From the command line via run_flaky_analysis.py.
   c. As an MCP tool by exposing run_analysis() through an MCP server.
+
+Two top-level entry points are provided:
+
+* ``run_analysis(output_xml_paths, ...)``
+    Classic mode – given local output.xml files, detect flaky tests and
+    optionally post a summary to a Jira issue.
+
+* ``analyze_ticket(jira_issue_key, ...)``
+    Ticket-driven mode – given a Jira ticket ID, fetch the ticket and all
+    attached files, analyse any Robot Framework output / log content, and
+    use Claude to identify the root cause and recommend a fix.  The result
+    is automatically posted back to the same Jira ticket.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .jira_client import JiraClient
 from .metrics import MetricsEngine, TestMetrics
@@ -39,7 +53,44 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Analysis result data model
+# Helpers
+# ---------------------------------------------------------------------------
+
+class _HTMLTextExtractor(HTMLParser):
+    """Minimal HTML-to-text converter used to strip Robot log.html files."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._parts: List[str] = []
+        self._skip_tags = {"script", "style"}
+        self._current_skip: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in self._skip_tags:
+            self._current_skip = tag
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == self._current_skip:
+            self._current_skip = None
+
+    def handle_data(self, data: str) -> None:
+        if self._current_skip is None:
+            stripped = data.strip()
+            if stripped:
+                self._parts.append(stripped)
+
+    def get_text(self) -> str:
+        return "\n".join(self._parts)
+
+
+def _strip_html(raw: str) -> str:
+    extractor = _HTMLTextExtractor()
+    extractor.feed(raw)
+    return extractor.get_text()
+
+
+# ---------------------------------------------------------------------------
+# Analysis result data models
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -50,6 +101,32 @@ class FlakyTestReport:
     metrics: List[TestMetrics]
     recommendations: Dict[str, List[Recommendation]]
     ai_summary: str = ""
+    formatted_report: str = ""
+
+
+@dataclass
+class AttachmentInfo:
+    """Metadata and extracted text for a single Jira attachment."""
+
+    filename: str
+    mime_type: str
+    size: int
+    text_content: str = ""
+    is_robot_xml: bool = False
+
+
+@dataclass
+class TicketAnalysisReport:
+    """Result of the ticket-driven analysis mode."""
+
+    issue_key: str
+    summary: str
+    status: str
+    attachments: List[AttachmentInfo] = field(default_factory=list)
+    robot_runs: List[ParsedRun] = field(default_factory=list)
+    flaky_metrics: List[TestMetrics] = field(default_factory=list)
+    root_cause: str = ""
+    recommended_solution: str = ""
     formatted_report: str = ""
 
 
@@ -315,3 +392,447 @@ class FlakyTestAnalysisSkill:
             logger.info("Analysis report posted to Jira issue %s", issue_key)
         except Exception as exc:
             logger.error("Failed to post report to Jira: %s", exc)
+
+    # ==================================================================
+    # Ticket-driven analysis mode
+    # ==================================================================
+
+    def analyze_ticket(
+        self,
+        jira_issue_key: str,
+        use_ai: bool = True,
+        post_comment: bool = True,
+    ) -> TicketAnalysisReport:
+        """
+        Analyse a Jira ticket end-to-end.
+
+        Given only a Jira ticket ID this method will:
+
+        1. Fetch the ticket metadata (summary, description, status, comments).
+        2. Download every attachment from the ticket.
+        3. Classify attachments – Robot ``output.xml`` files are parsed by the
+           existing :class:`RobotOutputParser`; HTML and plain-text log files
+           have their text extracted (HTML tags are stripped automatically).
+        4. Feed all gathered context to Claude and ask for a structured root-
+           cause analysis and recommended fix.
+        5. Optionally post the result back to the ticket as a comment.
+
+        Parameters
+        ----------
+        jira_issue_key:
+            The Jira issue key, e.g. ``NCCF-1593628``.
+        use_ai:
+            Use Claude to generate the root-cause analysis.  When *False* (or
+            when ``ANTHROPIC_API_KEY`` is not set) a rule-based summary is
+            produced instead.
+        post_comment:
+            If *True* and the AI analysis succeeds, post the formatted report
+            back to the Jira ticket as a comment.
+
+        Returns
+        -------
+        TicketAnalysisReport
+        """
+        client = self._jira or JiraClient()
+
+        logger.info("Fetching Jira ticket %s…", jira_issue_key)
+        issue = client.get_issue(jira_issue_key)
+
+        logger.info(
+            "Ticket: %s – %s [%s]",
+            jira_issue_key,
+            issue.get("summary", ""),
+            issue.get("status", ""),
+        )
+
+        # ----------------------------------------------------------------
+        # Download and classify attachments
+        # ----------------------------------------------------------------
+        raw_attachments = issue.get("attachments", [])
+        logger.info("Found %d attachment(s)", len(raw_attachments))
+
+        attachment_infos, robot_xml_paths = self._process_attachments(
+            client, raw_attachments
+        )
+
+        # ----------------------------------------------------------------
+        # Parse Robot Framework output.xml files (if any)
+        # ----------------------------------------------------------------
+        robot_runs: List[ParsedRun] = []
+        flaky_metrics: List[TestMetrics] = []
+        if robot_xml_paths:
+            logger.info(
+                "Parsing %d Robot Framework output.xml file(s)…", len(robot_xml_paths)
+            )
+            robot_runs = self._parser.parse_files(robot_xml_paths)
+            flaky_metrics = self._metrics_engine.compute(robot_runs)
+
+        # ----------------------------------------------------------------
+        # AI root-cause analysis
+        # ----------------------------------------------------------------
+        root_cause = ""
+        recommended_solution = ""
+        if use_ai and self._api_key:
+            root_cause, recommended_solution = self._generate_root_cause_analysis(
+                issue, attachment_infos, robot_runs, flaky_metrics
+            )
+
+        # ----------------------------------------------------------------
+        # Format report
+        # ----------------------------------------------------------------
+        formatted = self._format_ticket_report(
+            issue,
+            attachment_infos,
+            robot_runs,
+            flaky_metrics,
+            root_cause,
+            recommended_solution,
+        )
+
+        report = TicketAnalysisReport(
+            issue_key=jira_issue_key,
+            summary=issue.get("summary", ""),
+            status=issue.get("status", ""),
+            attachments=attachment_infos,
+            robot_runs=robot_runs,
+            flaky_metrics=flaky_metrics,
+            root_cause=root_cause,
+            recommended_solution=recommended_solution,
+            formatted_report=formatted,
+        )
+
+        if post_comment:
+            self._post_to_jira(jira_issue_key, formatted)
+
+        return report
+
+    # ------------------------------------------------------------------
+    # Attachment helpers
+    # ------------------------------------------------------------------
+
+    # Maximum characters extracted per attachment for the AI prompt.
+    _MAX_ATTACHMENT_CHARS = 12_000
+
+    def _process_attachments(
+        self,
+        client: JiraClient,
+        raw_attachments: List[Dict[str, Any]],
+    ) -> Tuple[List[AttachmentInfo], List[str]]:
+        """
+        Download every attachment and classify it.
+
+        Returns
+        -------
+        attachment_infos:
+            :class:`AttachmentInfo` objects with text content extracted.
+        robot_xml_paths:
+            Temporary file paths for Robot Framework ``output.xml`` files
+            suitable for passing to :class:`RobotOutputParser`.
+        """
+        attachment_infos: List[AttachmentInfo] = []
+        robot_xml_paths: List[str] = []
+
+        for att in raw_attachments:
+            filename: str = att.get("filename", "attachment")
+            mime_type: str = att.get("mimeType", "")
+            size: int = att.get("size", 0)
+
+            logger.info("Downloading attachment: %s (%d bytes)", filename, size)
+
+            try:
+                raw_bytes = client.download_attachment(att)
+            except Exception as exc:
+                logger.warning("Could not download %s: %s", filename, exc)
+                attachment_infos.append(
+                    AttachmentInfo(
+                        filename=filename,
+                        mime_type=mime_type,
+                        size=size,
+                        text_content=f"[Download failed: {exc}]",
+                    )
+                )
+                continue
+
+            is_robot_xml = self._is_robot_output_xml(filename, raw_bytes)
+
+            if is_robot_xml:
+                # Write to a temp file so the existing parser can read it
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".xml", delete=False, prefix=f"robot_{filename}_"
+                )
+                tmp.write(raw_bytes)
+                tmp.close()
+                robot_xml_paths.append(tmp.name)
+                attachment_infos.append(
+                    AttachmentInfo(
+                        filename=filename,
+                        mime_type=mime_type,
+                        size=size,
+                        text_content="[Robot Framework output.xml – parsed separately]",
+                        is_robot_xml=True,
+                    )
+                )
+            else:
+                text = self._bytes_to_text(filename, mime_type, raw_bytes)
+                attachment_infos.append(
+                    AttachmentInfo(
+                        filename=filename,
+                        mime_type=mime_type,
+                        size=size,
+                        text_content=text[: self._MAX_ATTACHMENT_CHARS],
+                    )
+                )
+
+        return attachment_infos, robot_xml_paths
+
+    @staticmethod
+    def _is_robot_output_xml(filename: str, raw_bytes: bytes) -> bool:
+        """Return True if the file looks like a Robot Framework output.xml."""
+        if not filename.lower().endswith(".xml"):
+            return False
+        # Peek at the first 512 bytes for the Robot signature
+        header = raw_bytes[:512].decode("utf-8", errors="replace")
+        return "<robot " in header or 'generator="Robot' in header
+
+    @staticmethod
+    def _bytes_to_text(filename: str, mime_type: str, raw_bytes: bytes) -> str:
+        """Decode bytes to a plain-text string, stripping HTML when needed."""
+        text = raw_bytes.decode("utf-8", errors="replace")
+        lower_name = filename.lower()
+        lower_mime = mime_type.lower()
+
+        if "html" in lower_mime or lower_name.endswith((".html", ".htm")):
+            return _strip_html(text)
+        return text
+
+    # ------------------------------------------------------------------
+    # AI root-cause analysis
+    # ------------------------------------------------------------------
+
+    def _generate_root_cause_analysis(
+        self,
+        issue: Dict[str, Any],
+        attachments: List[AttachmentInfo],
+        robot_runs: List[ParsedRun],
+        flaky_metrics: List[TestMetrics],
+    ) -> Tuple[str, str]:
+        """
+        Ask Claude to identify the root cause and recommend a fix.
+
+        Returns a tuple of (root_cause, recommended_solution) strings.
+        """
+        if not _ANTHROPIC_AVAILABLE:
+            logger.warning(
+                "anthropic package not installed; skipping AI analysis. "
+                "Install with: pip install anthropic"
+            )
+            return "", ""
+
+        prompt_lines = [
+            "You are an expert in Robot Framework, Python testing, and CI/CD pipelines.",
+            "",
+            "A Jenkins build has failed and a Jira ticket has been created automatically.",
+            "Your task is to:",
+            "  1. Identify the **root cause** of the failure.",
+            "  2. Provide a clear, actionable **recommended solution**.",
+            "",
+            "Respond with exactly two clearly labelled sections:",
+            "  **Root Cause:** (2–5 sentences describing what went wrong and why)",
+            "  **Recommended Solution:** (concrete steps or code changes to fix the issue)",
+            "",
+            "## Jira Ticket",
+            "",
+            f"**Key:** {issue.get('key', 'N/A')}",
+            f"**Status:** {issue.get('status', 'N/A')}",
+            f"**Summary:** {issue.get('summary', 'N/A')}",
+            "",
+        ]
+
+        description = (issue.get("description") or "").strip()
+        if description:
+            prompt_lines += [
+                "**Description:**",
+                "",
+                description[:3000],
+                "",
+            ]
+
+        comments = issue.get("comments", [])
+        if comments:
+            prompt_lines += ["**Recent Comments:**", ""]
+            for comment in comments[-3:]:  # Last 3 comments
+                prompt_lines.append(f"> {comment[:500]}")
+            prompt_lines.append("")
+
+        # Robot Framework parsed data
+        if robot_runs:
+            prompt_lines += ["## Robot Framework Test Results", ""]
+            for run in robot_runs:
+                failed = [t for t in run.tests if t.status == "FAIL"]
+                prompt_lines.append(
+                    f"**Run from `{Path(run.source_file).name}`:** "
+                    f"{len(run.tests)} tests, {len(failed)} failed"
+                )
+                for t in failed[:10]:  # Up to 10 failed tests
+                    prompt_lines.append(f"  - ❌ `{t.name}` ({t.suite})")
+                    if t.message:
+                        prompt_lines.append(f"    Error: {t.message[:300]}")
+            prompt_lines.append("")
+
+        if flaky_metrics:
+            flaky = [m for m in flaky_metrics if m.flakiness_score != "Stable"]
+            if flaky:
+                prompt_lines += ["## Flaky Tests Detected (across multiple runs)", ""]
+                for m in flaky:
+                    prompt_lines.append(
+                        f"- `{m.name}`: {m.flakiness_score} flakiness, "
+                        f"failure rate {m.failure_rate_display}"
+                    )
+                prompt_lines.append("")
+
+        # Log / attachment content
+        log_attachments = [a for a in attachments if not a.is_robot_xml and a.text_content]
+        if log_attachments:
+            prompt_lines += ["## Attached Logs", ""]
+            for att in log_attachments:
+                prompt_lines += [
+                    f"### `{att.filename}`",
+                    "",
+                    att.text_content[:self._MAX_ATTACHMENT_CHARS],
+                    "",
+                ]
+
+        prompt = "\n".join(prompt_lines)
+
+        client = _anthropic.Anthropic(api_key=self._api_key)
+        message = client.messages.create(
+            model=self._model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        full_response = message.content[0].text if message.content else ""
+
+        # Split the response into root cause / solution sections
+        root_cause, recommended_solution = self._parse_ai_response(full_response)
+        return root_cause, recommended_solution
+
+    @staticmethod
+    def _parse_ai_response(response: str) -> Tuple[str, str]:
+        """Extract root cause and recommended solution from the AI response."""
+        root_cause = ""
+        recommended_solution = ""
+
+        # Look for the two labelled sections (case-insensitive)
+        import re
+
+        rc_match = re.search(
+            r"\*{0,2}Root Cause:?\*{0,2}\s*(.*?)(?=\*{0,2}Recommended Solution:?|\Z)",
+            response,
+            re.IGNORECASE | re.DOTALL,
+        )
+        sol_match = re.search(
+            r"\*{0,2}Recommended Solution:?\*{0,2}\s*(.*)",
+            response,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        if rc_match:
+            root_cause = rc_match.group(1).strip()
+        if sol_match:
+            recommended_solution = sol_match.group(1).strip()
+
+        # Fallback: if the model didn't use the expected labels, return the full text
+        if not root_cause and not recommended_solution:
+            root_cause = response.strip()
+
+        return root_cause, recommended_solution
+
+    # ------------------------------------------------------------------
+    # Ticket report formatting
+    # ------------------------------------------------------------------
+
+    def _format_ticket_report(
+        self,
+        issue: Dict[str, Any],
+        attachments: List[AttachmentInfo],
+        robot_runs: List[ParsedRun],
+        flaky_metrics: List[TestMetrics],
+        root_cause: str,
+        recommended_solution: str,
+    ) -> str:
+        lines: List[str] = [
+            f"# Root Cause Analysis – {issue.get('key', 'N/A')}",
+            "",
+            f"**Summary:** {issue.get('summary', '')}  ",
+            f"**Status:** {issue.get('status', '')}  ",
+            f"**Attachments analysed:** {len(attachments)}  ",
+            "",
+        ]
+
+        # Attachments inventory
+        if attachments:
+            lines += ["## Attachments Found", ""]
+            for att in attachments:
+                icon = "🤖" if att.is_robot_xml else "📄"
+                lines.append(
+                    f"- {icon} `{att.filename}` ({att.mime_type or 'unknown'}, "
+                    f"{att.size:,} bytes)"
+                )
+            lines.append("")
+
+        # Robot test results
+        if robot_runs:
+            lines += ["## Robot Framework Test Results", ""]
+            for run in robot_runs:
+                failed = [t for t in run.tests if t.status == "FAIL"]
+                passed = [t for t in run.tests if t.status == "PASS"]
+                lines += [
+                    f"**Run:** `{Path(run.source_file).name}`  ",
+                    f"**Passed:** {len(passed)} | **Failed:** {len(failed)}",
+                    "",
+                ]
+                if failed:
+                    lines.append("| Test | Suite | Error |")
+                    lines.append("|------|-------|-------|")
+                    for t in failed[:20]:
+                        msg = (t.message or "")[:120].replace("\n", " ")
+                        lines.append(f"| `{t.name}` | `{t.suite}` | {msg} |")
+                    lines.append("")
+
+        # Flaky test summary
+        flaky = [m for m in flaky_metrics if m.flakiness_score != "Stable"]
+        if flaky:
+            lines += ["## Flaky Tests Detected", ""]
+            for m in flaky:
+                icon = {"High": "🔴", "Medium": "🟠", "Low": "🟡"}.get(
+                    m.flakiness_score, "⚪"
+                )
+                lines.append(
+                    f"- {icon} `{m.name}` — **{m.flakiness_score}** "
+                    f"({m.failure_rate_display})"
+                )
+            lines.append("")
+
+        # Root cause
+        if root_cause:
+            lines += ["## 🔍 Root Cause", "", root_cause, ""]
+        else:
+            lines += [
+                "## 🔍 Root Cause",
+                "",
+                "_AI analysis not available. Set `ANTHROPIC_API_KEY` to enable._",
+                "",
+            ]
+
+        # Recommended solution
+        if recommended_solution:
+            lines += ["## ✅ Recommended Solution", "", recommended_solution, ""]
+        elif root_cause:
+            lines += ["## ✅ Recommended Solution", "", "_See root cause above._", ""]
+
+        lines += [
+            "---",
+            "_Analysis generated automatically by the Flaky Test Analysis Skill._",
+        ]
+        return "\n".join(lines)

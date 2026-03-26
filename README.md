@@ -2,7 +2,10 @@
 
 ## Flaky Test Analysis AI Skill for Robot Framework
 
-An AI-powered skill that detects, analyses, and provides remediation guidance for intermittent (flaky) test failures in Robot Framework test suites. It identifies failure patterns across multiple CI runs, computes reliability metrics, generates code-level fix recommendations, and can automatically post structured analysis to Jira.
+An AI-powered skill that detects, analyses, and provides remediation guidance for intermittent (flaky) test failures in Robot Framework test suites. It can be driven in two ways:
+
+* **Local file analysis** – given one or more `output.xml` files, detect flaky tests across CI runs, compute reliability metrics, and post a report to Jira.
+* **Jira ticket-driven analysis** *(new)* – given a Jira ticket ID, fetch the ticket, download all attached logs, analyse Robot Framework output, and use Claude to identify the root cause and recommend a fix.
 
 ---
 
@@ -11,6 +14,7 @@ An AI-powered skill that detects, analyses, and provides remediation guidance fo
 - [Features](#features)
 - [Project Structure](#project-structure)
 - [Quick Start (Local Testing)](#quick-start-local-testing)
+- [Jira Ticket Analysis (New)](#jira-ticket-analysis-new)
 - [Configuration](#configuration)
 - [Running Tests](#running-tests)
 - [CLI Reference](#cli-reference)
@@ -31,6 +35,7 @@ An AI-powered skill that detects, analyses, and provides remediation guidance fo
 | **Reliability Metrics** | Failure rate, flakiness score (High / Medium / Low / Stable), duration variance, first / last seen timestamps |
 | **Fix Recommendations** | Concrete, copy-paste ready code snippets for each detected pattern |
 | **AI Executive Summary** | Optional Claude-powered natural-language summary of findings |
+| **Ticket-Driven Analysis** | Given a Jira ticket ID, the skill fetches the ticket, downloads all attachments (output.xml, log.html, .log files), and asks Claude to pinpoint the root cause and suggest a fix |
 | **Jira Integration** | Post formatted Markdown reports as Jira comments via REST API or MCP connector |
 
 ---
@@ -49,11 +54,11 @@ An AI-powered skill that detects, analyses, and provides remediation guidance fo
 │       ├── pattern_db.py           # Pattern knowledge base loader + matcher
 │       ├── metrics.py              # Flakiness metrics computation
 │       ├── recommender.py          # Fix recommendation generator
-│       ├── jira_client.py          # Jira REST / MCP integration
+│       ├── jira_client.py          # Jira REST / MCP integration (read + write)
 │       └── patterns/
 │           └── flaky_patterns.yaml # Built-in flaky pattern definitions
 └── tests/
-    ├── test_flaky_skill.py         # Unit + integration tests (35 tests)
+    ├── test_flaky_skill.py         # Unit + integration tests (56 tests)
     └── fixtures/
         ├── sample_output.xml       # Sample Robot Framework output (run 1)
         └── sample_output_run2.xml  # Sample Robot Framework output (run 2)
@@ -126,13 +131,49 @@ python run_flaky_analysis.py \
 
 ---
 
+## Jira Ticket Analysis (New)
+
+When Jenkins creates a Jira ticket for a failing build, pass the ticket ID directly to the skill. It will:
+
+1. **Fetch** the ticket (summary, description, comments).
+2. **Download** every attachment (`.xml`, `.html`, `.log`, etc.).
+3. **Parse** any Robot Framework `output.xml` files to extract test results.
+4. **Strip** HTML from `log.html` files to extract readable log content.
+5. **Ask Claude** for the root cause and a recommended fix.
+6. **Post** the analysis back to the same Jira ticket as a comment.
+
+### Minimal example
+
+```bash
+export JIRA_BASE_URL="https://n-able.atlassian.net"
+export JIRA_USER_EMAIL="your-email@n-able.com"
+export JIRA_API_TOKEN="<your-atlassian-api-token>"
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+python run_flaky_analysis.py --jira-ticket NCCF-1593628
+```
+
+### Dry-run (no Jira write, print to stdout only)
+
+```bash
+python run_flaky_analysis.py --jira-ticket NCCF-1593628 --no-post
+```
+
+### Offline (no AI, no Jira write)
+
+```bash
+python run_flaky_analysis.py --jira-ticket NCCF-1593628 --no-ai --no-post
+```
+
+---
+
 ## Configuration
 
 All sensitive settings are read from environment variables so that credentials are never stored in code.
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Optional | Anthropic API key for the Claude AI summary |
+| `ANTHROPIC_API_KEY` | Optional | Anthropic API key for the Claude AI analysis |
 | `JIRA_BASE_URL` | For Jira | e.g. `https://myorg.atlassian.net` |
 | `JIRA_USER_EMAIL` | For Jira | Atlassian account e-mail |
 | `JIRA_API_TOKEN` | For Jira | Jira API token (create at id.atlassian.com) |
@@ -151,7 +192,7 @@ pytest tests/test_flaky_skill.py -v
 pytest tests/test_flaky_skill.py -v --cov=skills --cov-report=term-missing
 ```
 
-Expected output: **35 tests passed**.
+Expected output: **56 tests passed**.
 
 ---
 
@@ -159,8 +200,10 @@ Expected output: **35 tests passed**.
 
 ```
 usage: run_flaky_analysis.py [-h]
-                             --robot-output FILE [FILE ...]
+                             [--robot-output FILE [FILE ...]]
                              [--jira-issue KEY]
+                             [--jira-ticket KEY]
+                             [--no-post]
                              [--no-ai]
                              [--output-file PATH]
                              [--model MODEL]
@@ -186,6 +229,8 @@ options:
 
 ## Python API
 
+### Local file analysis
+
 ```python
 from skills.flaky_test_analysis import FlakyTestAnalysisSkill
 
@@ -205,10 +250,26 @@ print(report.formatted_report)
 for metrics in report.metrics:
     if metrics.flakiness_score != "Stable":
         print(f"{metrics.name}: {metrics.flakiness_score} ({metrics.failure_rate_display})")
+```
 
-for test_name, recs in report.recommendations.items():
-    for rec in recs:
-        print(f"  [{rec.pattern_name}] {rec.fix_template[:80]}...")
+### Jira ticket-driven analysis
+
+```python
+from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+skill = FlakyTestAnalysisSkill(
+    anthropic_api_key="sk-ant-...",
+)
+
+report = skill.analyze_ticket(
+    jira_issue_key="NCCF-1593628",
+    use_ai=True,
+    post_comment=True,   # posts the analysis back to the ticket
+)
+
+print(report.root_cause)
+print(report.recommended_solution)
+print(report.formatted_report)
 ```
 
 ---
@@ -308,20 +369,27 @@ No code changes are required; the pattern is picked up automatically on the next
 ```
 run_flaky_analysis.py (CLI)
         │
-        ▼
-FlakyTestAnalysisSkill.run_analysis()
+        ├── MODE 1: --robot-output
+        │       │
+        │       ▼
+        │   FlakyTestAnalysisSkill.run_analysis()
+        │       ├─── RobotOutputParser  ──► ParsedRun[] (test results per file)
+        │       ├─── MetricsEngine      ──► TestMetrics[] (failure rate, score)
+        │       ├─── PatternDatabase    ──► matched Pattern[] per failed test
+        │       ├─── Recommender        ──► Recommendation[] (fix templates)
+        │       ├─── Claude API         ──► ai_summary (optional)
+        │       └─── JiraClient.post    ──► POST comment (optional)
         │
-        ├─── RobotOutputParser  ──► ParsedRun[] (test results per file)
-        │
-        ├─── MetricsEngine      ──► TestMetrics[] (failure rate, score, timestamps)
-        │
-        ├─── PatternDatabase    ──► matched Pattern[] per failed test
-        │
-        ├─── Recommender        ──► Recommendation[] (fix templates)
-        │
-        ├─── Claude API         ──► ai_summary (optional)
-        │
-        └─── JiraClient         ──► POST comment (optional)
+        └── MODE 2: --jira-ticket
+                │
+                ▼
+            FlakyTestAnalysisSkill.analyze_ticket()
+                ├─── JiraClient.get_issue()          ──► ticket metadata
+                ├─── JiraClient.download_attachment() ──► raw bytes per attachment
+                ├─── RobotOutputParser (if .xml)     ──► ParsedRun[] + TestMetrics[]
+                ├─── HTML stripper (if .html)         ──► plain text
+                ├─── Claude API                      ──► root_cause + recommended_solution
+                └─── JiraClient.post_analysis_report ──► POST comment
 ```
 
 ### Flakiness Score Definitions

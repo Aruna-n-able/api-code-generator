@@ -1,8 +1,8 @@
 """
-jira_client.py – Post flaky-test analysis results to Jira.
+jira_client.py – Read from and post to Jira issues.
 
 Supports two modes:
-  1. REST API  – direct HTTPS calls to the Jira REST v2/v3 endpoint.
+  1. REST API  – direct HTTPS calls to the Jira REST v2 endpoint.
   2. MCP       – delegates to an MCP connector (stub; implement as needed).
 
 Configuration is driven entirely by environment variables so that credentials
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ except ImportError:
 
 
 class JiraClient:
-    """Post formatted flaky-test analysis as Jira comments."""
+    """Read from and post formatted analysis as Jira comments."""
 
     def __init__(
         self,
@@ -50,7 +50,7 @@ class JiraClient:
         self.auth_mode = (auth_mode or os.environ.get("JIRA_AUTH_MODE", "rest")).lower()
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API – write
     # ------------------------------------------------------------------
 
     def post_comment(self, issue_key: str, body: str) -> Dict[str, Any]:
@@ -76,15 +76,97 @@ class JiraClient:
         return self.post_comment(issue_key, report)
 
     # ------------------------------------------------------------------
-    # REST implementation
+    # Public API – read
+    # ------------------------------------------------------------------
+
+    def get_issue(self, issue_key: str) -> Dict[str, Any]:
+        """
+        Fetch issue metadata from Jira.
+
+        Returns a dict with at minimum the keys:
+          ``summary``, ``description``, ``status``, ``attachments``, ``comments``
+
+        Raises ``RuntimeError`` on misconfiguration or HTTP error.
+        """
+        self._validate_rest_config()
+        self._require_requests()
+
+        fields = "summary,description,status,attachment,comment"
+        url = f"{self.base_url}/rest/api/2/issue/{issue_key}?fields={fields}"
+        auth = (self.user_email, self.api_token)
+
+        response = _requests.get(url, auth=auth, timeout=30)
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Jira API error fetching issue {issue_key}: "
+                f"{response.status_code} – {response.text}"
+            ) from exc
+
+        data = response.json()
+        fields_data = data.get("fields", {})
+
+        # Flatten to a convenient structure
+        return {
+            "key": data.get("key", issue_key),
+            "summary": fields_data.get("summary", ""),
+            "description": fields_data.get("description") or "",
+            "status": (fields_data.get("status") or {}).get("name", ""),
+            "attachments": fields_data.get("attachment") or [],
+            "comments": [
+                c.get("body", "")
+                for c in (fields_data.get("comment") or {}).get("comments", [])
+            ],
+        }
+
+    def list_attachments(self, issue_key: str) -> List[Dict[str, Any]]:
+        """
+        Return a list of attachment metadata dicts for the given issue.
+
+        Each dict contains at minimum: ``id``, ``filename``, ``mimeType``,
+        ``size``, ``content`` (the download URL).
+        """
+        issue = self.get_issue(issue_key)
+        return issue.get("attachments", [])
+
+    def download_attachment(self, attachment: Dict[str, Any]) -> bytes:
+        """
+        Download the raw bytes of an attachment.
+
+        Parameters
+        ----------
+        attachment:
+            A metadata dict as returned by :meth:`list_attachments`.
+            Must contain the ``content`` key (the download URL).
+        """
+        self._validate_rest_config()
+        self._require_requests()
+
+        content_url = attachment.get("content", "")
+        if not content_url:
+            raise RuntimeError(
+                f"Attachment '{attachment.get('filename', '?')}' has no content URL."
+            )
+
+        auth = (self.user_email, self.api_token)
+        response = _requests.get(content_url, auth=auth, timeout=60, stream=True)
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to download attachment '{attachment.get('filename', '?')}': "
+                f"{response.status_code} – {response.text}"
+            ) from exc
+
+        return response.content
+
+    # ------------------------------------------------------------------
+    # REST – write
     # ------------------------------------------------------------------
 
     def _post_via_rest(self, issue_key: str, body: str) -> Dict[str, Any]:
-        if not _REQUESTS_AVAILABLE:
-            raise RuntimeError(
-                "The 'requests' library is required for REST mode. "
-                "Install it with: pip install requests"
-            )
+        self._require_requests()
         self._validate_rest_config()
 
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}/comment"
@@ -102,6 +184,17 @@ class JiraClient:
 
         logger.info("Comment posted to Jira issue %s", issue_key)
         return response.json()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _require_requests(self) -> None:
+        if not _REQUESTS_AVAILABLE:
+            raise RuntimeError(
+                "The 'requests' library is required for REST mode. "
+                "Install it with: pip install requests"
+            )
 
     def _validate_rest_config(self) -> None:
         missing = [

@@ -7,6 +7,7 @@ Run with:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -383,3 +384,350 @@ class TestJiraClient:
 
         mock_req.post.assert_called_once()
         assert result["id"] == "12345"
+
+
+# ===========================================================================
+# JiraClient – read operations (get_issue, list_attachments, download)
+# ===========================================================================
+
+class TestJiraClientRead:
+    """Tests for the new read-side methods added to JiraClient."""
+
+    def _make_client(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        return JiraClient(
+            base_url="https://example.atlassian.net",
+            user_email="user@example.com",
+            api_token="fake-token",
+            auth_mode="rest",
+        )
+
+    def _mock_response(self, json_data, status_code=200):
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        mock_resp.json.return_value = json_data
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    def test_get_issue_returns_normalised_dict(self):
+        client = self._make_client()
+        api_payload = {
+            "key": "NCCF-1",
+            "fields": {
+                "summary": "Build failed",
+                "description": "Some description",
+                "status": {"name": "Open"},
+                "attachment": [
+                    {
+                        "id": "10001",
+                        "filename": "output.xml",
+                        "mimeType": "application/xml",
+                        "size": 1024,
+                        "content": "https://example.atlassian.net/secure/attachment/10001/output.xml",
+                    }
+                ],
+                "comment": {
+                    "comments": [
+                        {"body": "First comment"},
+                        {"body": "Second comment"},
+                    ]
+                },
+            },
+        }
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = self._mock_response(api_payload)
+            issue = client.get_issue("NCCF-1")
+
+        assert issue["key"] == "NCCF-1"
+        assert issue["summary"] == "Build failed"
+        assert issue["status"] == "Open"
+        assert len(issue["attachments"]) == 1
+        assert issue["attachments"][0]["filename"] == "output.xml"
+        assert issue["comments"] == ["First comment", "Second comment"]
+
+    def test_get_issue_handles_missing_fields_gracefully(self):
+        client = self._make_client()
+        # Minimal API response – some fields absent
+        api_payload = {"key": "NCCF-2", "fields": {}}
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = self._mock_response(api_payload)
+            issue = client.get_issue("NCCF-2")
+
+        assert issue["summary"] == ""
+        assert issue["description"] == ""
+        assert issue["status"] == ""
+        assert issue["attachments"] == []
+        assert issue["comments"] == []
+
+    def test_list_attachments_returns_list(self):
+        client = self._make_client()
+        api_payload = {
+            "key": "NCCF-3",
+            "fields": {
+                "attachment": [
+                    {"id": "1", "filename": "log.html", "mimeType": "text/html", "size": 512,
+                     "content": "https://example.atlassian.net/secure/attachment/1/log.html"},
+                    {"id": "2", "filename": "output.xml", "mimeType": "application/xml",
+                     "size": 256, "content": "https://example.atlassian.net/secure/attachment/2/output.xml"},
+                ],
+                "comment": {"comments": []},
+            },
+        }
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = self._mock_response(api_payload)
+            attachments = client.list_attachments("NCCF-3")
+
+        assert len(attachments) == 2
+        filenames = {a["filename"] for a in attachments}
+        assert filenames == {"log.html", "output.xml"}
+
+    def test_download_attachment_returns_bytes(self):
+        client = self._make_client()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"<robot generator='Robot'>...</robot>"
+        mock_resp.raise_for_status = MagicMock()
+
+        attachment = {
+            "filename": "output.xml",
+            "content": "https://example.atlassian.net/secure/attachment/1/output.xml",
+        }
+
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = mock_resp
+            data = client.download_attachment(attachment)
+
+        assert isinstance(data, bytes)
+        assert b"robot" in data
+
+    def test_download_attachment_raises_without_content_url(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(
+            base_url="https://example.atlassian.net",
+            user_email="user@example.com",
+            api_token="fake-token",
+        )
+        with pytest.raises(RuntimeError, match="no content URL"):
+            client.download_attachment({"filename": "empty.txt", "content": ""})
+
+    def test_get_issue_raises_on_http_error(self):
+        client = self._make_client()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = "Not Found"
+        mock_resp.raise_for_status.side_effect = Exception("404")
+
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = mock_resp
+            with pytest.raises(RuntimeError, match="Jira API error"):
+                client.get_issue("NCCF-999")
+
+
+# ===========================================================================
+# FlakyTestAnalysisSkill – analyze_ticket()
+# ===========================================================================
+
+SAMPLE_OUTPUT_XML = (Path(__file__).parent / "fixtures" / "sample_output.xml").read_bytes()
+
+
+def _make_jira_mock(
+    summary="Build failed on login suite",
+    status="Open",
+    description="Jenkins build #42 failed.\n\nSee attached log.",
+    attachments=None,
+    comments=None,
+):
+    """Return a mock JiraClient configured for ticket-driven tests."""
+    mock_client = MagicMock()
+    mock_client.get_issue.return_value = {
+        "key": "NCCF-1",
+        "summary": summary,
+        "status": status,
+        "description": description,
+        "attachments": attachments or [],
+        "comments": comments or [],
+    }
+    mock_client.list_attachments.return_value = attachments or []
+    mock_client.download_attachment.return_value = b"plain text log content: ERROR timeout"
+    mock_client.post_analysis_report.return_value = {"id": "99"}
+    return mock_client
+
+
+class TestAnalyzeTicket:
+    def setup_method(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        self.skill = FlakyTestAnalysisSkill
+
+    def test_analyze_ticket_returns_ticket_report(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill, TicketAnalysisReport
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert isinstance(report, TicketAnalysisReport)
+        assert report.issue_key == "NCCF-1"
+        assert report.summary == "Build failed on login suite"
+
+    def test_analyze_ticket_posts_comment_by_default(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=True)
+        mock_jira.post_analysis_report.assert_called_once_with("NCCF-1", mock_jira.post_analysis_report.call_args[0][1])
+
+    def test_analyze_ticket_skips_post_when_no_post(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        mock_jira.post_analysis_report.assert_not_called()
+
+    def test_analyze_ticket_with_text_attachment(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "1",
+                "filename": "build.log",
+                "mimeType": "text/plain",
+                "size": 100,
+                "content": "https://example.atlassian.net/secure/attachment/1/build.log",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = b"ERROR: test_login FAILED\nTimeout after 30s"
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert len(report.attachments) == 1
+        assert report.attachments[0].filename == "build.log"
+        assert "ERROR" in report.attachments[0].text_content
+
+    def test_analyze_ticket_with_html_attachment(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "2",
+                "filename": "log.html",
+                "mimeType": "text/html",
+                "size": 200,
+                "content": "https://example.atlassian.net/secure/attachment/2/log.html",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        html_content = b"<html><body><h1>Log</h1><p>Test failed</p><script>var x=1;</script></body></html>"
+        mock_jira.download_attachment.return_value = html_content
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        text = report.attachments[0].text_content
+        # HTML tags and script content should be stripped
+        assert "<html>" not in text
+        assert "var x=1" not in text
+        assert "Test failed" in text
+
+    def test_analyze_ticket_with_robot_xml_attachment(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "3",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/3/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # The robot xml should be classified as a robot xml attachment
+        assert any(a.is_robot_xml for a in report.attachments)
+        # And robot runs should be parsed
+        assert len(report.robot_runs) >= 1
+
+    def test_analyze_ticket_formatted_report_contains_key(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "NCCF-1" in report.formatted_report
+
+    def test_analyze_ticket_formatted_report_contains_root_cause_section(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "Root Cause" in report.formatted_report
+
+    def test_analyze_ticket_ai_skipped_without_api_key(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        with patch.dict("os.environ", {}, clear=True):
+            mock_jira = _make_jira_mock()
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="", jira_client=mock_jira)
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+            # No API key → root_cause stays empty
+            assert report.root_cause == ""
+
+    def test_analyze_ticket_ai_calls_claude_when_key_set(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text="**Root Cause:** Timeout. **Recommended Solution:** Add retry.")]
+
+        with patch("skills.flaky_test_analysis.skill._ANTHROPIC_AVAILABLE", True), \
+             patch("skills.flaky_test_analysis.skill._anthropic") as mock_ant:
+            mock_ant.Anthropic.return_value.messages.create.return_value = mock_message
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="sk-test", jira_client=mock_jira)
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "Timeout" in report.root_cause or "Timeout" in report.recommended_solution
+
+    def test_parse_ai_response_extracts_sections(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        response = (
+            "**Root Cause:** The test relies on a real system clock.\n\n"
+            "**Recommended Solution:** Use freezegun to freeze time in tests."
+        )
+        rc, sol = FlakyTestAnalysisSkill._parse_ai_response(response)
+        assert "real system clock" in rc
+        assert "freezegun" in sol
+
+    def test_parse_ai_response_fallback_when_no_labels(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        response = "The test is broken because of a timing issue."
+        rc, sol = FlakyTestAnalysisSkill._parse_ai_response(response)
+        # Fallback: everything goes into root_cause
+        assert "timing issue" in rc
+        assert sol == ""
+
+
+# ===========================================================================
+# CLI – --jira-ticket argument
+# ===========================================================================
+
+class TestCLIJiraTicketMode:
+    def test_jira_ticket_mode_calls_analyze_ticket(self):
+        from run_flaky_analysis import main
+        mock_report = MagicMock()
+        mock_report.formatted_report = "# Root Cause Analysis\nDone."
+        mock_report.flaky_metrics = []
+
+        with patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.return_value = mock_report
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post"])
+            assert exc_info.value.code == 0
+            MockSkill.return_value.analyze_ticket.assert_called_once_with(
+                jira_issue_key="NCCF-1",
+                use_ai=False,
+                post_comment=False,
+            )
+
+    def test_both_modes_mutually_exclusive(self):
+        from run_flaky_analysis import main
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--jira-ticket", "NCCF-1", "--robot-output", "file.xml"])
+        assert exc_info.value.code == 1
+
+    def test_no_mode_exits_with_error(self):
+        from run_flaky_analysis import main
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+        assert exc_info.value.code != 0
