@@ -55,6 +55,7 @@ Examples
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -149,6 +150,12 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def _check_jira_env() -> list[str]:
+    """Return a list of missing Jira environment variable names."""
+    required = ["JIRA_BASE_URL", "JIRA_USER_EMAIL", "JIRA_API_TOKEN"]
+    return [v for v in required if not os.environ.get(v, "").strip()]
+
+
 def main(argv=None):
     args = parse_args(argv)
 
@@ -182,11 +189,46 @@ def main(argv=None):
     # Mode 2 – Jira ticket-driven analysis
     # ----------------------------------------------------------------
     if args.jira_ticket:
-        report = skill.analyze_ticket(
-            jira_issue_key=args.jira_ticket,
-            use_ai=not args.no_ai,
-            post_comment=not args.no_post,
-        )
+        # Give a clear, actionable error before making any network calls.
+        missing_vars = _check_jira_env()
+        if missing_vars:
+            print(
+                "ERROR: The following environment variables are required to "
+                "connect to Jira but are not set:\n",
+                file=sys.stderr,
+            )
+            for var in missing_vars:
+                print(f"  {var}", file=sys.stderr)
+            print(
+                "\nSet them and re-run, for example:\n"
+                "\n"
+                "  export JIRA_BASE_URL='https://your-org.atlassian.net'\n"
+                "  export JIRA_USER_EMAIL='your-email@your-org.com'\n"
+                "  export JIRA_API_TOKEN='<your-atlassian-api-token>'\n"
+                "\n"
+                "Create an API token at: https://id.atlassian.com/manage-profile/security/api-tokens\n"
+                "\n"
+                "Add --no-ai to skip the Claude step if ANTHROPIC_API_KEY is also unset.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        try:
+            report = skill.analyze_ticket(
+                jira_issue_key=args.jira_ticket,
+                use_ai=not args.no_ai,
+                post_comment=not args.no_post,
+            )
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: Unexpected failure analysing ticket {args.jira_ticket}: {exc}", file=sys.stderr)
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
         formatted = report.formatted_report
         flaky_count = len([m for m in report.flaky_metrics if m.flakiness_score != "Stable"])
 

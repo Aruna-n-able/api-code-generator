@@ -672,7 +672,7 @@ class TestAnalyzeTicket:
         mock_message.content = [MagicMock(text="**Root Cause:** Timeout. **Recommended Solution:** Add retry.")]
 
         with patch("skills.flaky_test_analysis.skill._ANTHROPIC_AVAILABLE", True), \
-             patch("skills.flaky_test_analysis.skill._anthropic") as mock_ant:
+             patch("skills.flaky_test_analysis.skill._anthropic", create=True) as mock_ant:
             mock_ant.Anthropic.return_value.messages.create.return_value = mock_message
             skill = FlakyTestAnalysisSkill(anthropic_api_key="sk-test", jira_client=mock_jira)
             report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
@@ -703,13 +703,20 @@ class TestAnalyzeTicket:
 # ===========================================================================
 
 class TestCLIJiraTicketMode:
+    _FAKE_JIRA_ENV = {
+        "JIRA_BASE_URL": "https://example.atlassian.net",
+        "JIRA_USER_EMAIL": "ci@example.com",
+        "JIRA_API_TOKEN": "fake-token",
+    }
+
     def test_jira_ticket_mode_calls_analyze_ticket(self):
         from run_flaky_analysis import main
         mock_report = MagicMock()
         mock_report.formatted_report = "# Root Cause Analysis\nDone."
         mock_report.flaky_metrics = []
 
-        with patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
             MockSkill.return_value.analyze_ticket.return_value = mock_report
             with pytest.raises(SystemExit) as exc_info:
                 main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post"])
@@ -731,3 +738,43 @@ class TestCLIJiraTicketMode:
         with pytest.raises(SystemExit) as exc_info:
             main([])
         assert exc_info.value.code != 0
+
+    def test_missing_jira_env_exits_with_friendly_message(self, capsys):
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "JIRA_BASE_URL" in err
+        assert "JIRA_USER_EMAIL" in err
+        assert "JIRA_API_TOKEN" in err
+        # Should not be a raw traceback
+        assert "Traceback" not in err
+
+    def test_partial_jira_env_lists_only_missing_vars(self, capsys):
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", {"JIRA_BASE_URL": "https://example.atlassian.net"}, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        # The two missing vars should be listed under "not set:"
+        assert "JIRA_USER_EMAIL" in err
+        assert "JIRA_API_TOKEN" in err
+        # JIRA_BASE_URL should NOT appear in the "not set" bullet list
+        # (it may still appear in the static example section)
+        not_set_block = err.split("Set them and re-run")[0]
+        assert "JIRA_BASE_URL" not in not_set_block
+
+    def test_runtime_error_from_analyze_ticket_is_handled_gracefully(self, capsys):
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.side_effect = RuntimeError("Connection refused")
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "Connection refused" in err
+        assert "Traceback" not in err
