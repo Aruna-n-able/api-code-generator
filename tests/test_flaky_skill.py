@@ -697,6 +697,89 @@ class TestAnalyzeTicket:
         assert "timing issue" in rc
         assert sol == ""
 
+    def test_analyze_ticket_with_zip_containing_robot_xml(self):
+        """A ZIP attachment containing a Robot output.xml is extracted and parsed."""
+        import io
+        import zipfile
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("output.xml", SAMPLE_OUTPUT_XML)
+        zip_bytes = buf.getvalue()
+
+        attachments = [
+            {
+                "id": "5",
+                "filename": "test_results.zip",
+                "mimeType": "application/zip",
+                "size": len(zip_bytes),
+                "content": "https://example.atlassian.net/secure/attachment/5/test_results.zip",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = zip_bytes
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        # The zip archive itself should appear in attachment infos
+        assert any("test_results.zip" in a.filename for a in report.attachments)
+        # The Robot XML entry extracted from the zip should be classified correctly
+        assert any(a.is_robot_xml for a in report.attachments)
+        # Robot runs must have been parsed from the extracted XML
+        assert len(report.robot_runs) >= 1
+
+    def test_analyze_ticket_with_zip_containing_text_files(self):
+        """Text files inside a ZIP attachment are extracted and their content captured."""
+        import io
+        import zipfile
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("build.log", "ERROR: test_login FAILED\nTimeout after 30s")
+        zip_bytes = buf.getvalue()
+
+        attachments = [
+            {
+                "id": "6",
+                "filename": "logs.zip",
+                "mimeType": "application/zip",
+                "size": len(zip_bytes),
+                "content": "https://example.atlassian.net/secure/attachment/6/logs.zip",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = zip_bytes
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        # The extracted log entry should carry its text content
+        log_entries = [a for a in report.attachments if "build.log" in a.filename]
+        assert log_entries, "Expected an AttachmentInfo for build.log extracted from zip"
+        assert "ERROR" in log_entries[0].text_content
+
+    def test_analyze_ticket_no_ai_fallback_message(self):
+        """With use_ai=False and no robot runs the report says AI was skipped, not missing."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # Should mention --no-ai, not tell user to set ANTHROPIC_API_KEY
+        assert "--no-ai" in report.formatted_report
+        assert "Set `ANTHROPIC_API_KEY`" not in report.formatted_report
+
+    def test_is_zip_archive_detects_by_extension(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        assert FlakyTestAnalysisSkill._is_zip_archive("archive.zip", b"anything") is True
+        assert FlakyTestAnalysisSkill._is_zip_archive("output.xml", b"anything") is False
+
+    def test_is_zip_archive_detects_by_magic_bytes(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        zip_magic = b"PK\x03\x04" + b"\x00" * 10
+        assert FlakyTestAnalysisSkill._is_zip_archive("noextension", zip_magic) is True
+        assert FlakyTestAnalysisSkill._is_zip_archive("noextension", b"not a zip") is False
+
 
 # ===========================================================================
 # CLI – --jira-ticket argument

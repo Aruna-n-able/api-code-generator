@@ -29,9 +29,11 @@ Two top-level entry points are provided:
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -516,6 +518,7 @@ class FlakyTestAnalysisSkill:
             flaky_metrics,
             root_cause,
             recommended_solution,
+            use_ai=use_ai,
         )
 
         report = TicketAnalysisReport(
@@ -582,6 +585,15 @@ class FlakyTestAnalysisSkill:
                 )
                 continue
 
+            # ZIP archives – extract and process their contents
+            if self._is_zip_archive(filename, raw_bytes):
+                zip_infos, zip_xml_paths = self._extract_zip_attachment(
+                    filename, mime_type, size, raw_bytes
+                )
+                attachment_infos.extend(zip_infos)
+                robot_xml_paths.extend(zip_xml_paths)
+                continue
+
             is_robot_xml = self._is_robot_output_xml(filename, raw_bytes)
 
             if is_robot_xml:
@@ -622,6 +634,90 @@ class FlakyTestAnalysisSkill:
         # Peek at the first 512 bytes for the Robot signature
         header = raw_bytes[:512].decode("utf-8", errors="replace")
         return "<robot " in header or 'generator="Robot' in header
+
+    @staticmethod
+    def _is_zip_archive(filename: str, raw_bytes: bytes) -> bool:
+        """Return True if the file is a ZIP archive."""
+        return filename.lower().endswith(".zip") or raw_bytes[:4] == b"PK\x03\x04"
+
+    def _extract_zip_attachment(
+        self,
+        zip_filename: str,
+        zip_mime_type: str,
+        zip_size: int,
+        raw_bytes: bytes,
+    ) -> Tuple[List[AttachmentInfo], List[str]]:
+        """
+        Extract a ZIP archive and process its contents like direct attachments.
+
+        Robot Framework ``output.xml`` files found inside the archive are written
+        to temporary files and returned in ``robot_xml_paths`` for parsing.
+        Other files have their text extracted the same way as regular attachments.
+
+        The ZIP archive itself is also recorded as an :class:`AttachmentInfo` so
+        it appears in the formatted report.
+        """
+        attachment_infos: List[AttachmentInfo] = []
+        robot_xml_paths: List[str] = []
+
+        attachment_infos.append(
+            AttachmentInfo(
+                filename=zip_filename,
+                mime_type=zip_mime_type,
+                size=zip_size,
+                text_content="[ZIP archive – contents extracted and analysed below]",
+            )
+        )
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                for entry in zf.infolist():
+                    if entry.is_dir():
+                        continue
+                    entry_name = Path(entry.filename).name
+                    try:
+                        entry_bytes = zf.read(entry.filename)
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not read %s from %s: %s",
+                            entry.filename, zip_filename, exc,
+                        )
+                        continue
+
+                    if self._is_robot_output_xml(entry_name, entry_bytes):
+                        tmp = tempfile.NamedTemporaryFile(
+                            suffix=".xml",
+                            delete=False,
+                            prefix=f"robot_{entry_name}_",
+                        )
+                        tmp.write(entry_bytes)
+                        tmp.close()
+                        robot_xml_paths.append(tmp.name)
+                        attachment_infos.append(
+                            AttachmentInfo(
+                                filename=f"{zip_filename}/{entry.filename}",
+                                mime_type="application/xml",
+                                size=entry.file_size,
+                                text_content=(
+                                    "[Robot Framework output.xml – parsed separately]"
+                                ),
+                                is_robot_xml=True,
+                            )
+                        )
+                    else:
+                        text = self._bytes_to_text(entry_name, "", entry_bytes)
+                        attachment_infos.append(
+                            AttachmentInfo(
+                                filename=f"{zip_filename}/{entry.filename}",
+                                mime_type="",
+                                size=entry.file_size,
+                                text_content=text[: self._MAX_ATTACHMENT_CHARS],
+                            )
+                        )
+        except zipfile.BadZipFile as exc:
+            logger.warning("Could not open ZIP archive %s: %s", zip_filename, exc)
+
+        return attachment_infos, robot_xml_paths
 
     @staticmethod
     def _bytes_to_text(filename: str, mime_type: str, raw_bytes: bytes) -> str:
@@ -793,6 +889,7 @@ class FlakyTestAnalysisSkill:
         flaky_metrics: List[TestMetrics],
         root_cause: str,
         recommended_solution: str,
+        use_ai: bool = True,
     ) -> str:
         lines: List[str] = [
             f"# Root Cause Analysis – {issue.get('key', 'N/A')}",
@@ -850,6 +947,14 @@ class FlakyTestAnalysisSkill:
         # Root cause
         if root_cause:
             lines += ["## 🔍 Root Cause", "", root_cause, ""]
+        elif not use_ai:
+            lines += [
+                "## 🔍 Root Cause",
+                "",
+                "_AI analysis skipped (`--no-ai`). "
+                "See Robot Framework test results and detected patterns above._",
+                "",
+            ]
         else:
             lines += [
                 "## 🔍 Root Cause",
