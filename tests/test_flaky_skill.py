@@ -1096,3 +1096,48 @@ class TestAnthropicErrorHandling:
             )
 
         assert result == ("", "")
+
+    def test_connection_error_returns_empty_tuple(self, caplog):
+        """A non-HTTP error (connection / timeout) must also be caught gracefully."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        conn_exc = ConnectionError("Failed to establish a connection")
+
+        fake_anthropic = MagicMock()
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = conn_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="fake-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result == ("", "")
+
+    def test_ai_not_called_when_anthropic_unavailable(self):
+        """When _ANTHROPIC_AVAILABLE is False, AI functions must not be called."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "X-1", "summary": "S", "status": "Open",
+            "description": "", "attachments": [], "comments": [],
+        }
+        mock_jira.list_attachments.return_value = []
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="sk-real-key", jira_client=mock_jira)
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill, "_generate_root_cause_analysis", wraps=skill._generate_root_cause_analysis) as spy:
+            report = skill.analyze_ticket("X-1", use_ai=True, post_comment=False)
+
+        # _ANTHROPIC_AVAILABLE is False → the AI function must NOT have been called
+        spy.assert_not_called()
+        assert report.root_cause == ""

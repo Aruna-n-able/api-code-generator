@@ -70,11 +70,18 @@ def _handle_anthropic_error(exc: Exception) -> None:
             "Anthropic API authentication failed – verify ANTHROPIC_API_KEY is correct.\n"
             "  → Re-run with --no-ai to skip the AI step."
         )
+    elif status is None:
+        # Connection / timeout / other non-HTTP error
+        logger.warning(
+            "Claude API call failed (connection or timeout): %s\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            exc,
+        )
     else:
         logger.warning(
             "Claude API error (HTTP %s): %s\n"
             "  → Re-run with --no-ai to skip the AI step.",
-            status or "?",
+            status,
             exc,
         )
 
@@ -244,7 +251,7 @@ class FlakyTestAnalysisSkill:
         recommendations = self._recommender.recommend_all(metrics, all_results)
 
         ai_summary = ""
-        if use_ai_summary and self._api_key:
+        if use_ai_summary and self._api_key and _ANTHROPIC_AVAILABLE:
             ai_summary = self._generate_ai_summary(metrics, recommendations)
 
         formatted = self._format_report(metrics, recommendations, ai_summary, runs)
@@ -312,7 +319,7 @@ class FlakyTestAnalysisSkill:
                 messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
             )
             return message.content[0].text if message.content else ""
-        except _anthropic.APIStatusError as exc:
+        except Exception as exc:
             _handle_anthropic_error(exc)
             return ""
 
@@ -518,7 +525,7 @@ class FlakyTestAnalysisSkill:
         # ----------------------------------------------------------------
         root_cause = ""
         recommended_solution = ""
-        if use_ai and self._api_key:
+        if use_ai and self._api_key and _ANTHROPIC_AVAILABLE:
             root_cause, recommended_solution = self._generate_root_cause_analysis(
                 issue, attachment_infos, robot_runs, flaky_metrics
             )
@@ -856,7 +863,7 @@ class FlakyTestAnalysisSkill:
             )
 
             full_response = message.content[0].text if message.content else ""
-        except _anthropic.APIStatusError as exc:
+        except Exception as exc:
             _handle_anthropic_error(exc)
             return "", ""
 

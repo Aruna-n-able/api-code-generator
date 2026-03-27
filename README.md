@@ -203,7 +203,7 @@ pytest tests/test_flaky_skill.py -v
 pytest tests/test_flaky_skill.py -v --cov=skills --cov-report=term-missing
 ```
 
-Expected output: **56 tests passed**.
+Expected output: **78 tests passed**.
 
 ---
 
