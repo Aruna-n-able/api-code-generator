@@ -8,6 +8,7 @@ from .pattern_db import PatternDatabase
 from .metrics import MetricsEngine
 from .recommender import Recommender
 from .jira_client import JiraClient
+from .github_client import GitHubClient
 from .html_report import render_html_report, markdown_wrap
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "MetricsEngine",
     "Recommender",
     "JiraClient",
+    "GitHubClient",
     "render_html_report",
     "markdown_wrap",
 ]

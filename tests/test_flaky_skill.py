@@ -2480,3 +2480,553 @@ class TestHtmlReportCliFlag:
 
         mock_wrap.assert_called_once()
         assert html_path.exists()
+
+
+# ===========================================================================
+# Feature: GitHubClient and _extract_test_case
+# ===========================================================================
+
+class TestGitHubClient:
+    """Unit tests for GitHubClient (all HTTP calls are mocked)."""
+
+    def _make_client(self, token="test-token"):
+        from skills.flaky_test_analysis.github_client import GitHubClient
+        return GitHubClient(token=token, owner="nable-nc", repo="n-central")
+
+    def test_client_sets_auth_header_when_token_provided(self):
+        client = self._make_client(token="my-token")
+        assert "Authorization" in client._session.headers
+        assert "my-token" in client._session.headers["Authorization"]
+
+    def test_client_has_no_auth_header_without_token(self):
+        from skills.flaky_test_analysis.github_client import GitHubClient
+        with patch.dict("os.environ", {}, clear=True):
+            client = GitHubClient(token="", owner="nable-nc", repo="n-central")
+        assert "Authorization" not in client._session.headers
+
+    def test_search_robot_test_returns_empty_when_no_results(self):
+        client = self._make_client()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"items": []}
+        mock_resp.raise_for_status.return_value = None
+        with patch.object(client._session, "get", return_value=mock_resp):
+            file_path, snippet = client.search_robot_test("Verify Login")
+        assert file_path == ""
+        assert snippet == ""
+
+    def test_search_robot_test_returns_path_and_snippet_on_success(self):
+        """A search hit triggers get_file_content and returns the test snippet."""
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        import base64
+
+        robot_src = (
+            "*** Test Cases ***\n"
+            "Verify Login\n"
+            "    [Documentation]    Test login\n"
+            "    Open Browser    ${URL}\n"
+            "    Input Text    username    admin\n"
+            "    Click Button    Submit\n\n"
+            "Another Test\n"
+            "    Log    hello\n"
+        )
+        encoded = base64.b64encode(robot_src.encode()).decode()
+
+        search_resp = MagicMock()
+        search_resp.raise_for_status.return_value = None
+        search_resp.json.return_value = {"items": [{"path": "tests/login.robot"}]}
+
+        content_resp = MagicMock()
+        content_resp.raise_for_status.return_value = None
+        content_resp.json.return_value = {"content": encoded}
+
+        client = self._make_client()
+        call_count = [0]
+
+        def fake_get(url, **kwargs):
+            call_count[0] += 1
+            if "search" in url:
+                return search_resp
+            return content_resp
+
+        with patch.object(client._session, "get", side_effect=fake_get):
+            file_path, snippet = client.search_robot_test("Verify Login")
+
+        assert file_path == "tests/login.robot"
+        assert "Verify Login" in snippet
+        assert "Open Browser" in snippet
+        # The "Another Test" block must not be included
+        assert "Another Test" not in snippet
+        assert call_count[0] == 2  # search + content fetch
+
+    def test_search_robot_test_returns_empty_on_network_error(self):
+        client = self._make_client()
+        with patch.object(client._session, "get", side_effect=ConnectionError("timeout")):
+            file_path, snippet = client.search_robot_test("Verify Login")
+        assert file_path == ""
+        assert snippet == ""
+
+    def test_get_file_content_decodes_base64(self):
+        import base64
+        content = "*** Settings ***\nLibrary    OperatingSystem\n"
+        encoded = base64.b64encode(content.encode()).decode()
+        client = self._make_client()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"content": encoded}
+        with patch.object(client._session, "get", return_value=mock_resp):
+            result = client.get_file_content("path/to/file.robot")
+        assert result == content
+
+    def test_get_file_content_returns_empty_on_error(self):
+        client = self._make_client()
+        with patch.object(client._session, "get", side_effect=RuntimeError("boom")):
+            result = client.get_file_content("path/to/file.robot")
+        assert result == ""
+
+    def test_github_token_read_from_env(self):
+        from skills.flaky_test_analysis.github_client import GitHubClient
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "env-token"}):
+            client = GitHubClient()
+        assert "env-token" in client._session.headers.get("Authorization", "")
+
+
+class TestExtractTestCase:
+    """Tests for _extract_test_case helper."""
+
+    _ROBOT_FILE = (
+        "*** Settings ***\n"
+        "Library    SeleniumLibrary\n\n"
+        "*** Test Cases ***\n"
+        "Verify Login\n"
+        "    [Documentation]    Tests login flow\n"
+        "    Open Browser    ${URL}    Chrome\n"
+        "    Input Text    username    admin\n"
+        "    Click Button    Submit\n"
+        "    Page Should Contain    Dashboard\n\n"
+        "Verify Logout\n"
+        "    Click Link    Logout\n"
+        "    Page Should Contain    Login\n\n"
+        "*** Keywords ***\n"
+        "Open App\n"
+        "    Open Browser    ${URL}    Chrome\n"
+    )
+
+    def test_extracts_correct_test_case(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Verify Login")
+        assert "Verify Login" in result
+        assert "Open Browser" in result
+        assert "Verify Logout" not in result
+
+    def test_second_test_case_is_correct(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Verify Logout")
+        assert "Verify Logout" in result
+        assert "Click Link    Logout" in result
+        assert "Open Browser" not in result
+
+    def test_returns_file_excerpt_when_test_not_found(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Nonexistent Test")
+        # Falls back to first 3000 chars of file
+        assert "*** Settings ***" in result
+
+    def test_case_insensitive_match(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "verify login")
+        assert "Open Browser" in result
+
+    def test_underscore_space_equivalence(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Verify_Login")
+        assert "Open Browser" in result
+
+
+# ===========================================================================
+# Feature: pointwise AI prompt format
+# ===========================================================================
+
+class TestPointwisePrompt:
+    """The AI prompt must request bullet-point/numbered-list responses."""
+
+    def _make_skill(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill()
+
+    def test_root_cause_requested_as_bullet_list(self):
+        skill = self._make_skill()
+        issue = {
+            "key": "NCCF-1",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "comments": [],
+        }
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+        assert "bullet" in prompt.lower() or "- " in prompt, (
+            "Prompt must describe bullet-point format for Root Cause"
+        )
+
+    def test_recommended_solution_requested_as_numbered_list(self):
+        skill = self._make_skill()
+        issue = {
+            "key": "NCCF-1",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "comments": [],
+        }
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+        assert "numbered" in prompt.lower() or "1." in prompt, (
+            "Prompt must describe numbered-list format for Recommended Solution"
+        )
+
+    def test_prompt_includes_robot_source_when_provided(self):
+        skill = self._make_skill()
+        issue = {
+            "key": "NCCF-1",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "comments": [],
+        }
+        snippet = "Verify Login\n    Open Browser    ${URL}\n    Input Text    user    admin"
+        prompt = skill._build_root_cause_prompt(
+            issue, [], [], [],
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=snippet,
+        )
+        assert "Failing Test Source" in prompt
+        assert "Verify Login" in prompt
+        assert "corrected" in prompt.lower(), (
+            "When source is provided, prompt must ask for corrected version"
+        )
+
+    def test_prompt_omits_source_section_when_not_provided(self):
+        skill = self._make_skill()
+        issue = {
+            "key": "NCCF-1",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "comments": [],
+        }
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+        assert "Failing Test Source" not in prompt
+
+
+# ===========================================================================
+# Feature: robot source in TicketAnalysisReport and formatted report
+# ===========================================================================
+
+class TestRobotSourceInReport:
+    """Tests that robot_source_file/snippet flow through analyze_ticket correctly."""
+
+    def _make_jira_mock_no_attachments(self):
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "NCCF-1",
+            "summary": "Test failure",
+            "status": "Open",
+            "description": "",
+            "attachments": [],
+            "comments": [],
+        }
+        mock_jira.list_attachments.return_value = []
+        return mock_jira
+
+    def test_robot_source_stored_on_report(self):
+        """When GitHub returns a test snippet, it is stored on TicketAnalysisReport."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        mock_jira = self._make_jira_mock_no_attachments()
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = (
+            "tests/login.robot",
+            "Verify Login\n    Open Browser\n",
+        )
+
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira, github_client=mock_github)
+        # We won't have any failing tests (no attachments) so GitHub won't be called
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # With no failing tests, GitHub should not have been queried
+        mock_github.search_robot_test.assert_not_called()
+        assert report.robot_source_file == ""
+        assert report.robot_source_snippet == ""
+
+    def test_robot_source_fetched_when_failing_tests_found(self):
+        """When failing tests exist (from XML attachment), GitHub is queried."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        # Build a minimal Robot XML with a FAIL result
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<robot generator="Robot" generated="20240101 00:00:00.000">'
+            '<suite name="Login">'
+            '<test name="Verify Login">'
+            '<status status="FAIL" message="Element not found"/>'
+            '</test>'
+            '</suite>'
+            '<statistics/><errors/></robot>'
+        ).encode()
+
+        attachments = [{
+            "id": "1",
+            "filename": "output.xml",
+            "mimeType": "application/xml",
+            "size": len(xml),
+            "content": "https://example.atlassian.net/secure/attachment/1/output.xml",
+        }]
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "NCCF-2",
+            "summary": "Login failure",
+            "status": "Open",
+            "description": "",
+            "attachments": attachments,
+            "comments": [],
+        }
+        mock_jira.download_attachment.return_value = xml
+
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = (
+            "tests/login.robot",
+            "Verify Login\n    Open Browser\n",
+        )
+
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira, github_client=mock_github)
+        report = skill.analyze_ticket("NCCF-2", use_ai=False, post_comment=False)
+
+        mock_github.search_robot_test.assert_called_once_with("Verify Login")
+        assert report.robot_source_file == "tests/login.robot"
+        assert "Verify Login" in report.robot_source_snippet
+
+    def test_failing_test_source_appears_in_markdown_report(self):
+        """The formatted Markdown report must include the '🤖 Failing Test Source' section."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<robot generator="Robot" generated="20240101 00:00:00.000">'
+            '<suite name="Login">'
+            '<test name="Verify Login">'
+            '<status status="FAIL" message="Element not found"/>'
+            '</test>'
+            '</suite>'
+            '<statistics/><errors/></robot>'
+        ).encode()
+
+        attachments = [{
+            "id": "1",
+            "filename": "output.xml",
+            "mimeType": "application/xml",
+            "size": len(xml),
+            "content": "https://example.atlassian.net/secure/attachment/1/output.xml",
+        }]
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "NCCF-3",
+            "summary": "Login failure",
+            "status": "Open",
+            "description": "",
+            "attachments": attachments,
+            "comments": [],
+        }
+        mock_jira.download_attachment.return_value = xml
+
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = (
+            "tests/login.robot",
+            "Verify Login\n    Open Browser    ${URL}\n",
+        )
+
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira, github_client=mock_github)
+        report = skill.analyze_ticket("NCCF-3", use_ai=False, post_comment=False)
+
+        assert "🤖 Failing Test Source" in report.formatted_report
+        assert "tests/login.robot" in report.formatted_report
+        assert "Open Browser" in report.formatted_report
+
+    def test_no_failing_test_source_section_when_github_not_configured(self):
+        """Without a GitHub client, there is no 'Failing Test Source' section."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<robot generator="Robot" generated="20240101 00:00:00.000">'
+            '<suite name="Login">'
+            '<test name="Verify Login">'
+            '<status status="FAIL" message="Element not found"/>'
+            '</test>'
+            '</suite>'
+            '<statistics/><errors/></robot>'
+        ).encode()
+
+        attachments = [{
+            "id": "1",
+            "filename": "output.xml",
+            "mimeType": "application/xml",
+            "size": len(xml),
+            "content": "https://example.atlassian.net/secure/attachment/1/output.xml",
+        }]
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "NCCF-4",
+            "summary": "Login failure",
+            "status": "Open",
+            "description": "",
+            "attachments": attachments,
+            "comments": [],
+        }
+        mock_jira.download_attachment.return_value = xml
+
+        # Provide a mock that always returns empty (simulates no GitHub token)
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = ("", "")
+
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira, github_client=mock_github)
+        report = skill.analyze_ticket("NCCF-4", use_ai=False, post_comment=False)
+
+        assert "Failing Test Source" not in report.formatted_report
+
+
+# ===========================================================================
+# Feature: HTML report renders Failing Test Source and pointwise sections
+# ===========================================================================
+
+class TestHtmlReportPointwiseAndSource:
+    """Tests for the new HTML report features."""
+
+    def _make_report(self, robot_source_file="", robot_source_snippet="",
+                     root_cause="", recommended_solution=""):
+        from skills.flaky_test_analysis import TicketAnalysisReport
+        return TicketAnalysisReport(
+            issue_key="NCCF-1",
+            summary="Test",
+            status="Open",
+            root_cause=root_cause,
+            recommended_solution=recommended_solution,
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
+            formatted_report="",
+        )
+
+    def test_html_report_renders_failing_test_source(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            robot_source_file="tests/login.robot",
+            robot_source_snippet="Verify Login\n    Open Browser\n",
+        )
+        html = render_html_report([report])
+        assert "Failing Test Source" in html
+        assert "tests/login.robot" in html
+        assert "Open Browser" in html
+
+    def test_html_report_omits_source_section_when_empty(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report()
+        html = render_html_report([report])
+        assert "Failing Test Source" not in html
+
+    def test_html_report_renders_bullet_root_cause_as_ul(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            root_cause="- The test relies on system time.\n- The CI clock drifts.\n- No mock is used."
+        )
+        html = render_html_report([report])
+        assert "<ul>" in html
+        assert "<li>" in html
+        assert "system time" in html
+
+    def test_html_report_renders_numbered_solution_as_ol(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            recommended_solution="1. Add freezegun dependency.\n2. Decorate the test.\n3. Rerun CI."
+        )
+        html = render_html_report([report])
+        assert "<ol>" in html
+        assert "freezegun" in html
+
+    def test_pointwise_html_helper_converts_bullets(self):
+        from skills.flaky_test_analysis.html_report import _pointwise_html
+        text = "- First point\n- Second point\n- Third point"
+        html = _pointwise_html(text)
+        assert "<ul>" in html
+        assert html.count("<li>") == 3
+
+    def test_pointwise_html_helper_converts_numbered(self):
+        from skills.flaky_test_analysis.html_report import _pointwise_html
+        text = "1. Step one\n2. Step two\n3. Step three"
+        html = _pointwise_html(text)
+        assert "<ol>" in html
+        assert html.count("<li>") == 3
+
+    def test_pointwise_html_helper_falls_back_to_paragraph(self):
+        from skills.flaky_test_analysis.html_report import _pointwise_html
+        text = "This is plain prose without any list markers."
+        html = _pointwise_html(text)
+        assert "<p>" in html
+        assert "plain prose" in html
+
+
+# ===========================================================================
+# Feature: GitHubClient exported from package; CLI args pass through
+# ===========================================================================
+
+class TestGitHubClientIntegration:
+    """Package-level export and CLI wiring tests."""
+
+    def test_github_client_exported_from_package(self):
+        from skills.flaky_test_analysis import GitHubClient
+        assert callable(GitHubClient)
+
+    def test_skill_accepts_github_client_parameter(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill, GitHubClient
+        mock_gh = MagicMock(spec=GitHubClient)
+        skill = FlakyTestAnalysisSkill(github_client=mock_gh)
+        assert skill._github is mock_gh
+
+    def test_skill_accepts_github_token_parameter(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill(github_token="my-pat", github_owner="nable-nc", github_repo="n-central")
+        assert "my-pat" in skill._github._session.headers.get("Authorization", "")
+
+    def test_cli_github_token_passed_to_skill(self):
+        from run_flaky_analysis import main
+        _FAKE_JIRA_ENV = {
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_USER_EMAIL": "ci@example.com",
+            "JIRA_API_TOKEN": "fake-token",
+        }
+        mock_report = MagicMock()
+        mock_report.formatted_report = "# Done"
+        mock_report.flaky_metrics = []
+
+        captured = {}
+        original_init = __import__(
+            "skills.flaky_test_analysis", fromlist=["FlakyTestAnalysisSkill"]
+        ).FlakyTestAnalysisSkill.__init__
+
+        def fake_init(self, **kwargs):
+            captured.update(kwargs)
+            original_init(self, **kwargs)
+
+        with patch.dict("os.environ", _FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.return_value = mock_report
+            with pytest.raises(SystemExit):
+                main([
+                    "--jira-ticket", "NCCF-1",
+                    "--no-ai", "--no-post",
+                    "--github-token", "my-gh-token",
+                    "--ncrepo-owner", "nable-nc",
+                    "--ncrepo-repo", "n-central",
+                ])
+
+        _, kwargs = MockSkill.call_args
+        assert kwargs.get("github_token") == "my-gh-token"
+        assert kwargs.get("github_owner") == "nable-nc"
+        assert kwargs.get("github_repo") == "n-central"

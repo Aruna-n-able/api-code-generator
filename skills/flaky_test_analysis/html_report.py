@@ -100,6 +100,57 @@ def _para(text: str) -> str:
     return f"<p>{_inline(text)}</p>"
 
 
+def _pointwise_html(text: str) -> str:
+    """Convert a bullet/numbered-list text block to an HTML list.
+
+    Lines starting with ``- `` are rendered as ``<ul><li>…</li></ul>``.
+    Lines starting with ``1. ``, ``2. `` etc. are rendered as
+    ``<ol><li>…</li></ol>``.  Plain paragraph text falls back to ``<p>``.
+    Any mix of the two is handled gracefully.
+    """
+    lines = text.strip().splitlines()
+    ul_items: List[str] = []
+    ol_items: List[str] = []
+    plain_parts: List[str] = []
+    out_parts: List[str] = []
+
+    def _flush() -> None:
+        if ul_items:
+            out_parts.append(
+                "<ul>" + "".join(f"<li>{_inline(i)}</li>" for i in ul_items) + "</ul>"
+            )
+            ul_items.clear()
+        if ol_items:
+            out_parts.append(
+                "<ol>" + "".join(f"<li>{_inline(i)}</li>" for i in ol_items) + "</ol>"
+            )
+            ol_items.clear()
+        if plain_parts:
+            out_parts.append(f"<p>{_inline(' '.join(plain_parts))}</p>")
+            plain_parts.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            _flush()
+            continue
+        if stripped.startswith("- "):
+            if ol_items or plain_parts:
+                _flush()
+            ul_items.append(stripped[2:].strip())
+        elif re.match(r"^\d+\.\s", stripped):
+            if ul_items or plain_parts:
+                _flush()
+            ol_items.append(re.sub(r"^\d+\.\s*", "", stripped, count=1).strip())
+        else:
+            if ul_items or ol_items:
+                _flush()
+            plain_parts.append(stripped)
+
+    _flush()
+    return "\n".join(out_parts) if out_parts else _para(text)
+
+
 def _badge(status: str) -> str:
     """Return a coloured status badge HTML snippet."""
     s = status.lower()
@@ -452,6 +503,16 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
             )
         lines.append("</ul>")
 
+    # failing test source from n-central
+    src_snippet = (getattr(r, "robot_source_snippet", "") or "").strip()
+    src_file = (getattr(r, "robot_source_file", "") or "").strip()
+    if src_snippet:
+        lines += [
+            "<h2>🤖 Failing Test Source</h2>",
+            f'<p><em>Fetched from <code>{_e(src_file)}</code> in the n-central repository</em></p>',
+            _code_block(src_snippet, lang="robot"),
+        ]
+
     # pattern-based recommendations
     if r.recommendations:
         lines.append("<h2>💡 Detected Patterns &amp; Recommendations</h2>")
@@ -464,20 +525,22 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
                     f"<pre><code>{_e(rec.fix_template.strip())}</code></pre>",
                 ]
 
-    # root cause
+    # root cause – rendered as bullet list
     if r.root_cause:
-        lines += ["<h2>🔍 Root Cause</h2>", _para(r.root_cause)]
+        lines.append("<h2>🔍 Root Cause</h2>")
+        lines.append(_pointwise_html(r.root_cause))
 
-    # recommended solution
+    # recommended solution – rendered as ordered list
     if r.recommended_solution:
-        lines += ["<h2>✅ Recommended Solution</h2>", _para(r.recommended_solution)]
+        lines.append("<h2>✅ Recommended Solution</h2>")
+        lines.append(_pointwise_html(r.recommended_solution))
 
-    # code snippet
+    # code snippet (AI-corrected version)
     snippet = (r.code_snippet or "").strip()
     if snippet and snippet.upper() not in ("N/A", "NONE"):
         lang_match = re.match(r"```([a-z]+)", snippet)
-        lang = lang_match.group(1) if lang_match else "python"
-        lines += ["<h2>💻 Code Snippet</h2>", _code_block(snippet, lang=lang)]
+        lang = lang_match.group(1) if lang_match else "robot"
+        lines += ["<h2>💻 Corrected Code Snippet</h2>", _code_block(snippet, lang=lang)]
 
     lines += ["</div>", "</div>"]  # close card-body / card
     return "\n".join(lines)

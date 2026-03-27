@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .jira_client import JiraClient
+from .github_client import GitHubClient
 from .metrics import MetricsEngine, TestMetrics
 from .pattern_db import PatternDatabase
 from .recommender import Recommendation, Recommender
@@ -331,6 +332,8 @@ class TicketAnalysisReport:
     root_cause: str = ""
     recommended_solution: str = ""
     code_snippet: str = ""
+    robot_source_file: str = ""
+    robot_source_snippet: str = ""
     formatted_report: str = ""
 
 
@@ -384,6 +387,10 @@ class FlakyTestAnalysisSkill:
         groq_model: str = "llama-3.3-70b-versatile",
         patterns_file: Optional[str] = None,
         jira_client: Optional[JiraClient] = None,
+        github_token: Optional[str] = None,
+        github_owner: str = "nable-nc",
+        github_repo: str = "n-central",
+        github_client: Optional[GitHubClient] = None,
     ) -> None:
         self._api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._model = claude_model
@@ -398,6 +405,12 @@ class FlakyTestAnalysisSkill:
         )
         self._recommender = Recommender(self._pattern_db)
         self._jira: Optional[JiraClient] = jira_client
+        # GitHub client for fetching failing Robot test source from n-central
+        if github_client is not None:
+            self._github: Optional[GitHubClient] = github_client
+        else:
+            token = github_token or os.environ.get("GITHUB_TOKEN", "")
+            self._github = GitHubClient(token=token, owner=github_owner, repo=github_repo)
 
     # ------------------------------------------------------------------
     # Primary entry point
@@ -427,6 +440,35 @@ class FlakyTestAnalysisSkill:
             base_url=_GROQ_BASE_URL,
             max_retries=0,
         )
+
+    def _fetch_failing_test_source(
+        self, failing_test_names: List[str]
+    ) -> Tuple[str, str]:
+        """Fetch the source of the first resolvable failing test from the n-central repo.
+
+        Iterates through *failing_test_names* (in order) and calls the GitHub
+        Code Search API for each one.  Returns the file path and extracted
+        test-case snippet of the **first** match found.
+
+        Parameters
+        ----------
+        failing_test_names:
+            List of Robot Framework test case names that failed (e.g.
+            ``["Verify Login With Valid Credentials", "Verify Logout"]``).
+
+        Returns
+        -------
+        Tuple[str, str]
+            ``(file_path, test_case_snippet)``.  Both are empty strings when
+            ``self._github`` is ``None`` or when no test is found in the repo.
+        """
+        if self._github is None:
+            return "", ""
+        for name in failing_test_names:
+            file_path, snippet = self._github.search_robot_test(name)
+            if file_path:
+                return file_path, snippet
+        return "", ""
 
     def run_analysis(
         self,
@@ -787,6 +829,7 @@ class FlakyTestAnalysisSkill:
         robot_runs: List[ParsedRun] = []
         flaky_metrics: List[TestMetrics] = []
         ticket_recommendations: Dict[str, List[Recommendation]] = {}
+        all_failed: Dict[str, List[TestResult]] = {}
         if robot_xml_paths:
             logger.info(
                 "Parsing %d Robot Framework output.xml file(s)…", len(robot_xml_paths)
@@ -808,6 +851,23 @@ class FlakyTestAnalysisSkill:
                     ticket_recommendations[test_name] = recs
 
         # ----------------------------------------------------------------
+        # Fetch failing Robot test source from n-central repository
+        # ----------------------------------------------------------------
+        robot_source_file = ""
+        robot_source_snippet = ""
+        if all_failed:
+            logger.info(
+                "Searching n-central repository for failing test source…"
+            )
+            robot_source_file, robot_source_snippet = self._fetch_failing_test_source(
+                list(all_failed.keys())
+            )
+            if robot_source_file:
+                logger.info(
+                    "Fetched failing test source from %s", robot_source_file
+                )
+
+        # ----------------------------------------------------------------
         # AI root-cause analysis
         # ----------------------------------------------------------------
         root_cause = ""
@@ -817,17 +877,23 @@ class FlakyTestAnalysisSkill:
         if use_ai:
             if self._api_key and _ANTHROPIC_AVAILABLE:
                 root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis(
-                    issue, attachment_infos, robot_runs, flaky_metrics
+                    issue, attachment_infos, robot_runs, flaky_metrics,
+                    robot_source_file=robot_source_file,
+                    robot_source_snippet=robot_source_snippet,
                 )
             if not root_cause and self._openai_api_key and _OPENAI_AVAILABLE:
                 # Use OpenAI if Anthropic is not configured or failed
                 root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis_openai(
-                    issue, attachment_infos, robot_runs, flaky_metrics
+                    issue, attachment_infos, robot_runs, flaky_metrics,
+                    robot_source_file=robot_source_file,
+                    robot_source_snippet=robot_source_snippet,
                 )
             if not root_cause and self._groq_api_key and _OPENAI_AVAILABLE:
                 # Use Groq (free tier) as the last-resort fallback
                 root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis_groq(
-                    issue, attachment_infos, robot_runs, flaky_metrics
+                    issue, attachment_infos, robot_runs, flaky_metrics,
+                    robot_source_file=robot_source_file,
+                    robot_source_snippet=robot_source_snippet,
                 )
 
         # ----------------------------------------------------------------
@@ -842,6 +908,8 @@ class FlakyTestAnalysisSkill:
             root_cause,
             recommended_solution,
             code_snippet,
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
             use_ai=use_ai and not ai_error_hint,
             recommendations=ticket_recommendations,
             ai_key_set=any_ai_key_set,
@@ -859,6 +927,8 @@ class FlakyTestAnalysisSkill:
             root_cause=root_cause,
             recommended_solution=recommended_solution,
             code_snippet=code_snippet,
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
             formatted_report=formatted,
         )
 
@@ -1071,8 +1141,28 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
+        robot_source_file: str = "",
+        robot_source_snippet: str = "",
     ) -> str:
         """Build the prompt used by both AI providers for root-cause analysis."""
+        has_source = bool(robot_source_snippet)
+
+        if has_source:
+            snippet_instruction = (
+                "  **Code Snippet:** (provide the *corrected* version of the "
+                "failing Robot Framework test shown in the 'Failing Test Source' "
+                "section below, using a ```robot fenced code block; apply only the "
+                "minimal changes needed to fix the root cause; write \"N/A\" if no "
+                "code change is required)"
+            )
+        else:
+            snippet_instruction = (
+                "  **Code Snippet:** (a ready-to-use code example implementing "
+                "the fix, using a fenced code block with the appropriate language "
+                "tag such as ```python or ```robot; write \"N/A\" if no code "
+                "change is needed)"
+            )
+
         prompt_lines = [
             "",
             "A Jenkins build has failed and a Jira ticket has been created automatically.",
@@ -1081,12 +1171,12 @@ class FlakyTestAnalysisSkill:
             "  2. Provide a clear, actionable **recommended solution**.",
             "  3. Provide a **code snippet** implementing the fix.",
             "",
-            "Respond with exactly three clearly labelled sections:",
-            "  **Root Cause:** (2–5 sentences describing what went wrong and why)",
-            "  **Recommended Solution:** (concrete steps or code changes to fix the issue)",
-            "  **Code Snippet:** (a ready-to-use code example implementing the fix, using a "
-            "fenced code block with the appropriate language tag such as ```python or "
-            "```robot; write \"N/A\" if no code change is needed)",
+            "Respond with exactly three clearly labelled sections using the formats below:",
+            "  **Root Cause:** (3–5 bullet points, each on its own line starting with '- ', "
+            "describing what went wrong and why)",
+            "  **Recommended Solution:** (numbered action steps, each on its own line "
+            "starting with '1. ', '2. ', etc.)",
+            snippet_instruction,
             "",
             "## Jira Ticket",
             "",
@@ -1143,6 +1233,21 @@ class FlakyTestAnalysisSkill:
                     )
                 prompt_lines.append("")
 
+        # Actual Robot test source fetched from the n-central repository
+        if has_source:
+            prompt_lines += [
+                "## Failing Test Source",
+                f"*(fetched from `{robot_source_file}` in the n-central repository)*",
+                "",
+                "```robot",
+                robot_source_snippet,
+                "```",
+                "",
+                "Use the test source above to understand the exact steps being executed "
+                "and produce a corrected version in the 'Code Snippet' section.",
+                "",
+            ]
+
         # Log / attachment content
         log_attachments = [a for a in attachments if not a.is_robot_xml and a.text_content]
         if log_attachments:
@@ -1163,6 +1268,8 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
+        robot_source_file: str = "",
+        robot_source_snippet: str = "",
     ) -> Tuple[str, str, str, str]:
         """
         Ask Claude to identify the root cause and recommend a fix.
@@ -1178,7 +1285,11 @@ class FlakyTestAnalysisSkill:
             )
             return "", "", "", ""
 
-        prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
+        prompt = self._build_root_cause_prompt(
+            issue, attachments, robot_runs, flaky_metrics,
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
+        )
 
         try:
             client = _anthropic.Anthropic(api_key=self._api_key)
@@ -1203,6 +1314,8 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
+        robot_source_file: str = "",
+        robot_source_snippet: str = "",
     ) -> Tuple[str, str, str, str]:
         """
         Ask OpenAI to identify the root cause and recommend a fix.
@@ -1218,7 +1331,11 @@ class FlakyTestAnalysisSkill:
             )
             return "", "", "", ""
 
-        prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
+        prompt = self._build_root_cause_prompt(
+            issue, attachments, robot_runs, flaky_metrics,
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
+        )
 
         client = self._create_openai_client()
         models_to_try = _build_model_list(self._openai_model)
@@ -1255,6 +1372,8 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
+        robot_source_file: str = "",
+        robot_source_snippet: str = "",
     ) -> Tuple[str, str, str, str]:
         """
         Ask Groq (free LLM tier) to identify the root cause and recommend a fix.
@@ -1273,7 +1392,11 @@ class FlakyTestAnalysisSkill:
             )
             return "", "", "", ""
 
-        prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
+        prompt = self._build_root_cause_prompt(
+            issue, attachments, robot_runs, flaky_metrics,
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
+        )
 
         client = self._create_groq_client()
         models_to_try = _build_groq_model_list(self._groq_model)
@@ -1368,6 +1491,8 @@ class FlakyTestAnalysisSkill:
         root_cause: str,
         recommended_solution: str,
         code_snippet: str = "",
+        robot_source_file: str = "",
+        robot_source_snippet: str = "",
         use_ai: bool = True,
         recommendations: Optional[Dict[str, List[Recommendation]]] = None,
         ai_key_set: bool = False,
@@ -1446,6 +1571,19 @@ class FlakyTestAnalysisSkill:
                     f"({m.failure_rate_display})"
                 )
             lines.append("")
+
+        # Failing test source fetched from n-central repository
+        src_snippet = (robot_source_snippet or "").strip()
+        if src_snippet:
+            lines += [
+                "## 🤖 Failing Test Source",
+                f"*(from `{robot_source_file}` in the n-central repository)*",
+                "",
+                "```robot",
+                src_snippet,
+                "```",
+                "",
+            ]
 
         # Pattern-based recommendations for failed tests
         if recommendations:

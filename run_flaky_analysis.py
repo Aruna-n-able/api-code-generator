@@ -222,6 +222,29 @@ def parse_args(argv=None):
              "Uses the bundled patterns by default.",
     )
     parser.add_argument(
+        "--github-token",
+        metavar="TOKEN",
+        default=None,
+        help="GitHub personal access token used to fetch failing Robot test "
+             "source files from the n-central repository. "
+             "Falls back to the GITHUB_TOKEN environment variable. "
+             "Without a token the GitHub Search API is used unauthenticated "
+             "(10 requests/min; sufficient for low-volume use).",
+    )
+    parser.add_argument(
+        "--ncrepo-owner",
+        metavar="OWNER",
+        default="nable-nc",
+        help="GitHub owner/organisation of the n-central repository "
+             "(default: nable-nc).",
+    )
+    parser.add_argument(
+        "--ncrepo-repo",
+        metavar="REPO",
+        default="n-central",
+        help="GitHub repository name for n-central (default: n-central).",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         default=False,
@@ -300,6 +323,9 @@ def main(argv=None):
             openai_model=args.openai_model,
             groq_model=args.groq_model,
             patterns_file=args.patterns_file,
+            github_token=args.github_token,
+            github_owner=args.ncrepo_owner,
+            github_repo=args.ncrepo_repo,
         )
     except ImportError as exc:
         # Catches lazy-loaded dependencies that are only resolved at
