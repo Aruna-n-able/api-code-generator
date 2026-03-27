@@ -64,6 +64,12 @@ except ImportError:
 # gpt-3.5-turbo is the last-resort fallback for very restricted accounts.
 _OPENAI_FALLBACK_MODELS: List[str] = ["gpt-4o-mini", "gpt-3.5-turbo"]
 
+# Groq free-tier models in preference order.
+# llama-3.3-70b-versatile offers the best quality on the free tier;
+# llama-3.1-8b-instant is a lighter fallback when the 70B model is unavailable.
+_GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+_GROQ_FALLBACK_MODELS: List[str] = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
 
 def _is_openai_model_not_found(exc: Exception) -> bool:
     """Return True when *exc* indicates the requested OpenAI model is unavailable."""
@@ -181,6 +187,66 @@ def _handle_openai_error(exc: Exception) -> str:
         return f"API error (HTTP {status})"
 
 
+def _build_groq_model_list(primary: str) -> List[str]:
+    """Return an ordered list of Groq models to try, starting with *primary*.
+
+    Fallbacks from ``_GROQ_FALLBACK_MODELS`` are appended only when they
+    differ from the primary model, so there are no duplicate attempts.
+    """
+    models = [primary]
+    for fallback in _GROQ_FALLBACK_MODELS:
+        if fallback not in models:
+            models.append(fallback)
+    return models
+
+
+def _handle_groq_error(exc: Exception) -> str:
+    """Log a clear, actionable message for a Groq API error.
+
+    Returns a short, user-facing description of the error suitable for
+    inclusion in the formatted report.
+    """
+    msg = str(exc)
+    status = getattr(exc, "status_code", None)
+    if "rate_limit_exceeded" in msg or status == 429:
+        logger.error(
+            "Groq API error: rate limit exceeded.\n"
+            "  → Wait a moment and retry, or check your usage at https://console.groq.com\n"
+            "  → Or re-run with --no-ai to skip the AI step and still get the "
+            "pattern-based analysis."
+        )
+        return "Groq rate limit exceeded"
+    elif status == 401 or "authentication" in msg.lower() or "api_key" in msg.lower() or "invalid_api_key" in msg.lower():
+        logger.error(
+            "Groq API authentication failed – verify GROQ_API_KEY is correct.\n"
+            "  → Get a free API key at https://console.groq.com\n"
+            "  → Re-run with --no-ai to skip the AI step."
+        )
+        return "Groq authentication error – check GROQ_API_KEY"
+    elif status == 404 or "model_not_found" in msg or "does not exist" in msg:
+        logger.error(
+            "Groq API error: the requested model was not found.\n"
+            "  → See https://console.groq.com/docs/models for valid model IDs.\n"
+            "  → Re-run with --no-ai to skip the AI step."
+        )
+        return "Groq model not found"
+    elif status is None:
+        logger.warning(
+            "Groq API call failed (connection or timeout): %s\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            exc,
+        )
+        return "Groq connection or timeout error"
+    else:
+        logger.warning(
+            "Groq API error (HTTP %s): %s\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            status,
+            exc,
+        )
+        return f"Groq API error (HTTP {status})"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -274,8 +340,7 @@ class FlakyTestAnalysisSkill:
     ----------
     anthropic_api_key:
         Anthropic API key.  Falls back to the ``ANTHROPIC_API_KEY`` env var.
-        When not set, the skill tries OpenAI if ``OPENAI_API_KEY`` is set;
-        otherwise rule-based output is used.
+        When not set, the skill tries OpenAI, then Groq as a free fallback.
     claude_model:
         Claude model to use for summarisation.
     openai_api_key:
@@ -286,6 +351,15 @@ class FlakyTestAnalysisSkill:
         OpenAI model to use (default: ``gpt-4o-mini``).
         If the requested model is not available on the account, the skill
         automatically retries with ``gpt-4o-mini`` and then ``gpt-3.5-turbo``.
+    groq_api_key:
+        Groq API key.  Falls back to the ``GROQ_API_KEY`` env var.
+        Groq provides a **free tier** and is used as the last-resort AI
+        fallback when both Anthropic and OpenAI are unavailable or fail.
+        Obtain a free key at https://console.groq.com
+    groq_model:
+        Groq model to use (default: ``llama-3.3-70b-versatile``).
+        Falls back to ``llama-3.1-8b-instant`` if the primary model is
+        unavailable.
     patterns_file:
         Path to a custom ``flaky_patterns.yaml``; uses the bundled one by default.
     jira_client:
@@ -299,6 +373,8 @@ class FlakyTestAnalysisSkill:
         claude_model: str = "claude-sonnet-4-6",
         openai_api_key: Optional[str] = None,
         openai_model: str = "gpt-4o-mini",
+        groq_api_key: Optional[str] = None,
+        groq_model: str = "llama-3.3-70b-versatile",
         patterns_file: Optional[str] = None,
         jira_client: Optional[JiraClient] = None,
     ) -> None:
@@ -306,6 +382,8 @@ class FlakyTestAnalysisSkill:
         self._model = claude_model
         self._openai_api_key = openai_api_key or os.environ.get("OPENAI_API_KEY", "")
         self._openai_model = openai_model
+        self._groq_api_key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
+        self._groq_model = groq_model
         self._parser = RobotOutputParser()
         self._metrics_engine = MetricsEngine()
         self._pattern_db = (
@@ -329,6 +407,19 @@ class FlakyTestAnalysisSkill:
         or authentication failures (401), retrying is wasteful.
         """
         return _openai.OpenAI(api_key=self._openai_api_key, max_retries=0)
+
+    def _create_groq_client(self):
+        """Return a Groq client configured for this skill instance.
+
+        Groq exposes an OpenAI-compatible API, so the same ``openai`` package
+        is reused with a custom ``base_url``.  ``max_retries=0`` prevents
+        wasteful SDK-level retries for permanent errors (rate limits, bad key).
+        """
+        return _openai.OpenAI(
+            api_key=self._groq_api_key,
+            base_url=_GROQ_BASE_URL,
+            max_retries=0,
+        )
 
     def run_analysis(
         self,
@@ -725,11 +816,16 @@ class FlakyTestAnalysisSkill:
                 root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis_openai(
                     issue, attachment_infos, robot_runs, flaky_metrics
                 )
+            if not root_cause and self._groq_api_key and _OPENAI_AVAILABLE:
+                # Use Groq (free tier) as the last-resort fallback
+                root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis_groq(
+                    issue, attachment_infos, robot_runs, flaky_metrics
+                )
 
         # ----------------------------------------------------------------
         # Format report
         # ----------------------------------------------------------------
-        any_ai_key_set = bool(self._api_key) or bool(self._openai_api_key)
+        any_ai_key_set = bool(self._api_key) or bool(self._openai_api_key) or bool(self._groq_api_key)
         formatted = self._format_ticket_report(
             issue,
             attachment_infos,
@@ -1132,6 +1228,64 @@ class FlakyTestAnalysisSkill:
                     )
                     continue
                 error_hint = _handle_openai_error(exc)
+                return "", "", error_hint
+
+    def _generate_root_cause_analysis_groq(
+        self,
+        issue: Dict[str, Any],
+        attachments: List[AttachmentInfo],
+        robot_runs: List[ParsedRun],
+        flaky_metrics: List[TestMetrics],
+    ) -> Tuple[str, str, str]:
+        """
+        Ask Groq (free LLM tier) to identify the root cause and recommend a fix.
+
+        Groq provides a free API tier backed by open-source models such as
+        Llama 3.3 70B.  It is used as the last-resort AI fallback when both
+        Anthropic and OpenAI are unavailable or have exceeded their quotas.
+
+        Returns a tuple of (root_cause, recommended_solution, error_hint).
+        error_hint is non-empty only when the API call failed.
+        """
+        if not _OPENAI_AVAILABLE:
+            logger.warning(
+                "openai package not installed; Groq integration requires it. "
+                "Install with: pip install openai"
+            )
+            return "", "", ""
+
+        prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
+
+        client = self._create_groq_client()
+        models_to_try = _build_groq_model_list(self._groq_model)
+        for model in models_to_try:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    max_tokens=1024,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                if model != self._groq_model:
+                    logger.info(
+                        "Groq: fell back to model '%s' for root-cause analysis.", model
+                    )
+                full_response = (
+                    response.choices[0].message.content or ""
+                    if response.choices
+                    else ""
+                )
+                root_cause, recommended_solution = self._parse_ai_response(full_response)
+                return root_cause, recommended_solution, ""
+            except Exception as exc:
+                if (
+                    (getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc))
+                    and model != models_to_try[-1]
+                ):
+                    logger.warning(
+                        "Groq model '%s' not found; trying next fallback…", model
+                    )
+                    continue
+                error_hint = _handle_groq_error(exc)
                 return "", "", error_hint
 
     @staticmethod

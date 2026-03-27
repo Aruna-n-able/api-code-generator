@@ -138,9 +138,8 @@ def parse_args(argv=None):
         "--no-ai",
         action="store_true",
         default=False,
-        help="Skip the AI analysis step (Claude or OpenAI). "
-             "Useful when neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set "
-             "or for offline use.",
+        help="Skip the AI analysis step (Claude, OpenAI, or Groq). "
+             "Useful when no AI API key is set or for offline use.",
     )
     parser.add_argument(
         "--output-file",
@@ -162,6 +161,14 @@ def parse_args(argv=None):
              "used as a fallback. If the chosen model is not available on your "
              "account, the skill automatically falls back to gpt-4o-mini and "
              "then gpt-3.5-turbo.",
+    )
+    parser.add_argument(
+        "--groq-model",
+        default="llama-3.3-70b-versatile",
+        help="Groq model to use when GROQ_API_KEY is set "
+             "(default: llama-3.3-70b-versatile). Groq offers a free tier – "
+             "obtain a key at https://console.groq.com. "
+             "Used as the last-resort AI fallback after Anthropic and OpenAI.",
     )
     parser.add_argument(
         "--patterns-file",
@@ -213,6 +220,7 @@ def main(argv=None):
         skill = FlakyTestAnalysisSkill(
             claude_model=args.model,
             openai_model=args.openai_model,
+            groq_model=args.groq_model,
             patterns_file=args.patterns_file,
         )
     except ImportError as exc:
@@ -255,7 +263,8 @@ def main(argv=None):
                 "\n"
                 "Create an API token at: https://id.atlassian.com/manage-profile/security/api-tokens\n"
                 "\n"
-                "Add --no-ai to skip the AI step if neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set.",
+                "Add --no-ai to skip the AI step if no AI API key is set.\n"
+                "For a free AI option, set GROQ_API_KEY (see https://console.groq.com).",
                 file=sys.stderr,
             )
             sys.exit(1)

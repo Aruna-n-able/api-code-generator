@@ -1688,3 +1688,323 @@ class TestOpenAISupport:
 
         _, kwargs = MockSkill.call_args
         assert kwargs.get("openai_model") == "gpt-4-turbo"
+
+
+# ===========================================================================
+# Groq free-LLM integration
+# ===========================================================================
+
+class TestGroqSupport:
+    """Tests covering Groq as the free-tier fallback AI provider."""
+
+    def _make_groq_error(self, status_code: int, message: str):
+        exc = Exception(f"Error code: {status_code} - {message}")
+        exc.status_code = status_code
+        return exc
+
+    # ------------------------------------------------------------------
+    # Constructor / configuration
+    # ------------------------------------------------------------------
+
+    def test_skill_accepts_groq_api_key_parameter(self):
+        """FlakyTestAnalysisSkill stores the groq_api_key passed directly."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
+        assert skill._groq_api_key == "gsk-test"
+
+    def test_skill_reads_groq_api_key_from_env(self):
+        """When groq_api_key is not passed, GROQ_API_KEY env var is used."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        with patch.dict("os.environ", {"GROQ_API_KEY": "gsk-env-key"}):
+            skill = FlakyTestAnalysisSkill()
+        assert skill._groq_api_key == "gsk-env-key"
+
+    def test_skill_accepts_groq_model_parameter(self):
+        """FlakyTestAnalysisSkill stores the groq_model passed directly."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill(groq_model="llama-3.1-8b-instant")
+        assert skill._groq_model == "llama-3.1-8b-instant"
+
+    def test_groq_model_default_is_llama33_70b(self):
+        """The default Groq model is llama-3.3-70b-versatile (best free-tier quality)."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill()
+        assert skill._groq_model == "llama-3.3-70b-versatile"
+
+    # ------------------------------------------------------------------
+    # _create_groq_client
+    # ------------------------------------------------------------------
+
+    def test_groq_client_uses_groq_base_url(self):
+        """_create_groq_client() creates an OpenAI client pointing at the Groq endpoint."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        captured: list = []
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.side_effect = FakeClient
+
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
+        with patch.object(skill_module, "_openai", fake_openai, create=True):
+            skill._create_groq_client()
+
+        assert captured, "OpenAI() constructor should have been called"
+        assert captured[0].get("base_url") == skill_module._GROQ_BASE_URL
+        assert captured[0].get("max_retries") == 0
+
+    # ------------------------------------------------------------------
+    # _build_groq_model_list helper
+    # ------------------------------------------------------------------
+
+    def test_build_groq_model_list_primary_not_in_fallbacks(self):
+        """A non-default primary model gets all fallbacks appended without duplicates."""
+        from skills.flaky_test_analysis.skill import _build_groq_model_list
+        result = _build_groq_model_list("llama-3.3-70b-versatile")
+        assert result[0] == "llama-3.3-70b-versatile"
+        assert len(result) == len(set(result))
+
+    def test_build_groq_model_list_primary_is_fallback(self):
+        """When the primary is already a known fallback, no duplicates are added."""
+        from skills.flaky_test_analysis.skill import _build_groq_model_list
+        result = _build_groq_model_list("llama-3.1-8b-instant")
+        assert result[0] == "llama-3.1-8b-instant"
+        assert result.count("llama-3.1-8b-instant") == 1
+
+    # ------------------------------------------------------------------
+    # _generate_root_cause_analysis_groq – success path
+    # ------------------------------------------------------------------
+
+    def test_generate_root_cause_analysis_groq_success(self):
+        """A successful Groq call returns (root_cause, recommended_solution, '')."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Flaky timing dependency.\n"
+            "**Recommended Solution:** Use deterministic waits."
+        )
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            rc, sol, hint = skill._generate_root_cause_analysis_groq(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert "timing" in rc.lower()
+        assert "deterministic" in sol.lower()
+        assert hint == ""
+
+    # ------------------------------------------------------------------
+    # Error handling
+    # ------------------------------------------------------------------
+
+    def test_groq_rate_limit_returns_error_hint(self, caplog):
+        """A 429 rate-limit error from Groq returns a non-empty error_hint."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        rate_exc = self._make_groq_error(429, "rate_limit_exceeded")
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = rate_exc
+
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
+        with caplog.at_level("ERROR"), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            rc, sol, hint = skill._generate_root_cause_analysis_groq(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert rc == "" and sol == ""
+        assert "rate limit" in hint.lower()
+
+    def test_groq_returns_empty_when_package_missing(self):
+        """When _OPENAI_AVAILABLE is False the Groq method returns ('', '', '')."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", False):
+            result = skill._generate_root_cause_analysis_groq(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+        assert result == ("", "", "")
+
+    def test_groq_falls_back_on_model_not_found(self):
+        """A 404 model-not-found triggers retry with the next fallback model."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        not_found_exc = self._make_groq_error(404, "model_not_found for llama-3.3-70b-versatile")
+
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Timeout.\n**Recommended Solution:** Increase wait."
+        )
+        success_resp = MagicMock()
+        success_resp.choices = [choice]
+
+        call_results = [not_found_exc, success_resp]
+
+        def side_effect(**kwargs):
+            result = call_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = side_effect
+
+        skill = FlakyTestAnalysisSkill(
+            groq_api_key="gsk-test",
+            groq_model="llama-3.3-70b-versatile",
+        )
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            rc, sol, hint = skill._generate_root_cause_analysis_groq(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert "Timeout" in rc
+        assert hint == ""
+
+    # ------------------------------------------------------------------
+    # analyze_ticket – Groq as third-priority fallback
+    # ------------------------------------------------------------------
+
+    def test_analyze_ticket_falls_back_to_groq_when_both_paid_fail(self):
+        """When Anthropic and OpenAI both fail, analyze_ticket falls back to Groq."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        mock_jira = _make_jira_mock()
+
+        # Anthropic billing error
+        fake_anthropic = MagicMock()
+        billing_exc = Exception("your credit balance is too low")
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = billing_exc
+
+        # OpenAI quota error
+        openai_quota_exc = Exception("Error code: 429 - exceeded your current quota")
+        openai_quota_exc.status_code = 429
+
+        # Groq success
+        groq_choice = MagicMock()
+        groq_choice.message.content = (
+            "**Root Cause:** Service not available.\n"
+            "**Recommended Solution:** Retry with back-off."
+        )
+
+        call_count = {"n": 0}
+
+        def openai_side_effect(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise openai_quota_exc
+            resp = MagicMock()
+            resp.choices = [groq_choice]
+            return resp
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = openai_side_effect
+
+        skill = FlakyTestAnalysisSkill(
+            anthropic_api_key="ant-test",
+            openai_api_key="sk-test",
+            groq_api_key="gsk-test",
+            jira_client=mock_jira,
+        )
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "Service not available" in report.root_cause
+        assert "back-off" in report.recommended_solution
+
+    def test_analyze_ticket_no_ai_skips_groq(self):
+        """With use_ai=False, Groq is never called."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test", jira_client=mock_jira)
+
+        fake_openai = MagicMock()
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        fake_openai.OpenAI.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # CLI support
+    # ------------------------------------------------------------------
+
+    def test_cli_groq_model_arg_is_passed_to_skill(self):
+        """--groq-model CLI argument is forwarded to FlakyTestAnalysisSkill."""
+        from run_flaky_analysis import main
+
+        _FAKE_JIRA_ENV = {
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_USER_EMAIL": "ci@example.com",
+            "JIRA_API_TOKEN": "fake-token",
+        }
+        mock_report = MagicMock()
+        mock_report.formatted_report = "# Done"
+        mock_report.flaky_metrics = []
+
+        with patch.dict("os.environ", _FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.return_value = mock_report
+            with pytest.raises(SystemExit):
+                main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post",
+                      "--groq-model", "llama-3.1-8b-instant"])
+
+        _, kwargs = MockSkill.call_args
+        assert kwargs.get("groq_model") == "llama-3.1-8b-instant"
+
+    def test_cli_groq_model_default(self):
+        """When --groq-model is not passed, the default llama-3.3-70b-versatile is used."""
+        from run_flaky_analysis import main
+
+        _FAKE_JIRA_ENV = {
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_USER_EMAIL": "ci@example.com",
+            "JIRA_API_TOKEN": "fake-token",
+        }
+        mock_report = MagicMock()
+        mock_report.formatted_report = "# Done"
+        mock_report.flaky_metrics = []
+
+        with patch.dict("os.environ", _FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.return_value = mock_report
+            with pytest.raises(SystemExit):
+                main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post"])
+
+        _, kwargs = MockSkill.call_args
+        assert kwargs.get("groq_model") == "llama-3.3-70b-versatile"
