@@ -207,6 +207,31 @@ def _build_groq_model_list(primary: str) -> List[str]:
     return models
 
 
+def _is_request_too_large(exc: Exception) -> bool:
+    """Return True when *exc* signals that the Groq request payload is too large.
+
+    Groq returns HTTP 400 (not 413) for prompts that exceed the model's
+    context window.  The response body typically contains one of several
+    recognisable phrases such as ``"request_too_large"``,
+    ``"context_length_exceeded"``, ``"maximum context length"``,
+    or ``"Please reduce the length"``.
+    """
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    msg = str(exc).lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "request_too_large",
+            "context_length_exceeded",
+            "maximum context length",
+            "please reduce the length",
+            "reduce the length of the messages",
+            "tokens in your prompt",
+        )
+    )
+
+
 def _handle_groq_error(exc: Exception) -> str:
     """Log a clear, actionable message for a Groq API error.
 
@@ -237,6 +262,22 @@ def _handle_groq_error(exc: Exception) -> str:
             "  → Re-run with --no-ai to skip the AI step."
         )
         return "Groq model not found"
+    elif _is_request_too_large(exc):
+        logger.warning(
+            "Groq API error: request payload is too large for the model's context window.\n"
+            "  → The combined prompt (ticket description, logs, robot source) exceeds "
+            "the model limit.\n"
+            "  → The skill will automatically retry with fewer log attachments.\n"
+            "  → If the error persists, re-run with --no-ai to skip the AI step."
+        )
+        return "Groq request too large"
+    elif status == 400:
+        logger.warning(
+            "Groq API error (HTTP 400 – bad request): %s\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            exc,
+        )
+        return "Groq API error (HTTP 400)"
     elif status is None:
         logger.warning(
             "Groq API call failed (connection or timeout): %s\n"
@@ -1155,8 +1196,19 @@ class FlakyTestAnalysisSkill:
         robot_source_file: str = "",
         robot_source_snippet: str = "",
         failing_test_name: str = "",
+        max_attachment_chars: Optional[int] = None,
     ) -> str:
-        """Build the prompt used by both AI providers for root-cause analysis."""
+        """Build the prompt used by both AI providers for root-cause analysis.
+
+        *max_attachment_chars* overrides :attr:`_MAX_ATTACHMENT_CHARS` for the
+        log attachment section.  Pass a smaller value to produce a shorter prompt
+        when retrying after a ``request_too_large`` (HTTP 400) error.
+        """
+        attachment_limit = (
+            max_attachment_chars
+            if max_attachment_chars is not None
+            else self._MAX_ATTACHMENT_CHARS
+        )
         has_source = bool(robot_source_snippet)
 
         if has_source:
@@ -1291,7 +1343,7 @@ class FlakyTestAnalysisSkill:
                 prompt_lines += [
                     f"### `{att.filename}`",
                     "",
-                    att.text_content[:self._MAX_ATTACHMENT_CHARS],
+                    att.text_content[:attachment_limit],
                     "",
                 ]
 
@@ -1418,6 +1470,11 @@ class FlakyTestAnalysisSkill:
                 error_hint = _handle_openai_error(exc)
                 return "", "", "", "", error_hint
 
+    # Reduced attachment limit used when retrying after a request_too_large error.
+    # 2 000 characters (roughly 500 tokens) leaves ample room for ticket metadata
+    # and robot source while staying within even the smallest Groq context window.
+    _GROQ_REDUCED_ATTACHMENT_CHARS: int = 2_000
+
     def _generate_root_cause_analysis_groq(
         self,
         issue: Dict[str, Any],
@@ -1435,6 +1492,11 @@ class FlakyTestAnalysisSkill:
         Llama 3.3 70B.  It is used as the last-resort AI fallback when both
         Anthropic and OpenAI are unavailable or have exceeded their quotas.
 
+        When Groq returns HTTP 400 with a ``request_too_large`` body the method
+        automatically rebuilds the prompt with a drastically reduced attachment
+        limit (:attr:`_GROQ_REDUCED_ATTACHMENT_CHARS`) and retries once before
+        giving up.
+
         Returns a tuple of
         ``(root_cause, recommended_solution, affected_line, code_snippet, error_hint)``.
         ``error_hint`` is non-empty only when the API call failed.
@@ -1446,12 +1508,16 @@ class FlakyTestAnalysisSkill:
             )
             return "", "", "", "", ""
 
-        prompt = self._build_root_cause_prompt(
-            issue, attachments, robot_runs, flaky_metrics,
-            robot_source_file=robot_source_file,
-            robot_source_snippet=robot_source_snippet,
-            failing_test_name=failing_test_name,
-        )
+        def _build_prompt(max_att: Optional[int] = None) -> str:
+            return self._build_root_cause_prompt(
+                issue, attachments, robot_runs, flaky_metrics,
+                robot_source_file=robot_source_file,
+                robot_source_snippet=robot_source_snippet,
+                failing_test_name=failing_test_name,
+                max_attachment_chars=max_att,
+            )
+
+        prompt = _build_prompt()
         system_msg = (
             "You are a concise QA technical reporter. "
             "Output ONLY the four labelled sections requested. "
@@ -1461,37 +1527,52 @@ class FlakyTestAnalysisSkill:
         client = self._create_groq_client()
         models_to_try = _build_groq_model_list(self._groq_model)
         for model in models_to_try:
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    max_tokens=2048,
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                if model != self._groq_model:
-                    logger.info(
-                        "Groq: fell back to model '%s' for root-cause analysis.", model
+            # Attempt the call; on request_too_large retry once with a shorter prompt.
+            attempts = [(prompt, False), (_build_prompt(self._GROQ_REDUCED_ATTACHMENT_CHARS), True)]
+            for current_prompt, is_retry in attempts:
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        max_tokens=2048,
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": current_prompt},
+                        ],
                     )
-                full_response = (
-                    response.choices[0].message.content or ""
-                    if response.choices
-                    else ""
-                )
-                root_cause, recommended_solution, affected_line, code_snippet = self._parse_ai_response(full_response)
-                return root_cause, recommended_solution, affected_line, code_snippet, ""
-            except Exception as exc:
-                if (
-                    (getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc))
-                    and model != models_to_try[-1]
-                ):
-                    logger.warning(
-                        "Groq model '%s' not found; trying next fallback…", model
+                    if model != self._groq_model:
+                        logger.info(
+                            "Groq: fell back to model '%s' for root-cause analysis.", model
+                        )
+                    if is_retry:
+                        logger.info(
+                            "Groq: retry with reduced attachment limit succeeded."
+                        )
+                    full_response = (
+                        response.choices[0].message.content or ""
+                        if response.choices
+                        else ""
                     )
-                    continue
-                error_hint = _handle_groq_error(exc)
-                return "", "", "", "", error_hint
+                    root_cause, recommended_solution, affected_line, code_snippet = self._parse_ai_response(full_response)
+                    return root_cause, recommended_solution, affected_line, code_snippet, ""
+                except Exception as exc:
+                    if (
+                        (getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc))
+                        and model != models_to_try[-1]
+                    ):
+                        logger.warning(
+                            "Groq model '%s' not found; trying next fallback…", model
+                        )
+                        break  # move to next model
+                    if _is_request_too_large(exc) and not is_retry:
+                        logger.warning(
+                            "Groq request too large for model '%s'; "
+                            "retrying with reduced attachment content…",
+                            model,
+                        )
+                        continue  # retry inner loop with shorter prompt
+                    error_hint = _handle_groq_error(exc)
+                    return "", "", "", "", error_hint
+        return "", "", "", "", "Groq API error (all models exhausted)"
 
     @staticmethod
     def _parse_ai_response(response: str) -> Tuple[str, str, str, str]:

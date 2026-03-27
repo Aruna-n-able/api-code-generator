@@ -2009,8 +2009,172 @@ class TestGroqSupport:
         _, kwargs = MockSkill.call_args
         assert kwargs.get("groq_model") == "llama-3.3-70b-versatile"
 
+    # ------------------------------------------------------------------
+    # HTTP 400 / request_too_large handling
+    # ------------------------------------------------------------------
 
-class TestBuildRootCausePrompt:
+    def test_handle_groq_error_request_too_large_returns_specific_hint(self, caplog):
+        """An HTTP 400 with 'request_too_large' body gets a descriptive error hint."""
+        from skills.flaky_test_analysis.skill import _handle_groq_error
+        exc = self._make_groq_error(400, "request_too_large: Please reduce the length of the messages")
+        with caplog.at_level("WARNING"):
+            hint = _handle_groq_error(exc)
+        assert hint == "Groq request too large"
+        assert "too large" in caplog.text.lower()
+
+    def test_handle_groq_error_context_length_exceeded_returns_specific_hint(self, caplog):
+        """An HTTP 400 with 'context_length_exceeded' body is also identified as too large."""
+        from skills.flaky_test_analysis.skill import _handle_groq_error
+        exc = self._make_groq_error(400, "context_length_exceeded: maximum context length is 131072 tokens")
+        with caplog.at_level("WARNING"):
+            hint = _handle_groq_error(exc)
+        assert hint == "Groq request too large"
+
+    def test_handle_groq_error_generic_400_returns_generic_hint(self, caplog):
+        """An HTTP 400 with an unrecognised body falls back to the generic 400 message."""
+        from skills.flaky_test_analysis.skill import _handle_groq_error
+        exc = self._make_groq_error(400, "invalid_request_error: bad parameter value")
+        with caplog.at_level("WARNING"):
+            hint = _handle_groq_error(exc)
+        assert hint == "Groq API error (HTTP 400)"
+
+    def test_is_request_too_large_true_for_known_phrases(self):
+        """_is_request_too_large returns True for all known phrase variants."""
+        from skills.flaky_test_analysis.skill import _is_request_too_large
+        phrases = [
+            "request_too_large",
+            "context_length_exceeded",
+            "maximum context length",
+            "please reduce the length",
+            "reduce the length of the messages",
+            "tokens in your prompt",
+        ]
+        for phrase in phrases:
+            exc = self._make_groq_error(400, f"error: {phrase}")
+            assert _is_request_too_large(exc), f"Expected True for phrase: {phrase!r}"
+
+    def test_is_request_too_large_false_for_non_400(self):
+        """_is_request_too_large returns False when status code is not 400."""
+        from skills.flaky_test_analysis.skill import _is_request_too_large
+        exc = self._make_groq_error(429, "request_too_large: some message")
+        assert not _is_request_too_large(exc)
+
+    def test_groq_retries_with_shorter_prompt_on_request_too_large(self):
+        """When the first call returns HTTP 400 request_too_large, the method
+        retries with a shorter prompt and returns the successful result."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        too_large_exc = self._make_groq_error(
+            400, "request_too_large: Please reduce the length of the messages"
+        )
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Element missing.\n"
+            "**Recommended Solution:** Add explicit wait."
+        )
+        success_resp = MagicMock()
+        success_resp.choices = [choice]
+
+        call_results = [too_large_exc, success_resp]
+
+        def side_effect(**kwargs):
+            result = call_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = side_effect
+
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            rc, sol, al, snippet, hint = skill._generate_root_cause_analysis_groq(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert "Element missing" in rc
+        assert hint == ""
+        # Exactly two calls: first (full prompt) → error, second (short prompt) → success
+        assert fake_openai.OpenAI.return_value.chat.completions.create.call_count == 2
+
+    def test_groq_returns_error_hint_when_retry_also_fails(self):
+        """When both the full-prompt and short-prompt attempts fail, error_hint is set."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        too_large_exc = self._make_groq_error(
+            400, "request_too_large: Please reduce the length of the messages"
+        )
+        other_exc = self._make_groq_error(400, "invalid_request_error: still failing")
+
+        def side_effect(**kwargs):
+            # Alternate: first call → too_large, second call → unrelated 400
+            raise too_large_exc if side_effect.count == 0 else other_exc
+        side_effect.count = 0
+
+        call_n = {"n": 0}
+
+        def side_effect2(**kwargs):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                raise too_large_exc
+            raise other_exc
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = side_effect2
+
+        skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            rc, sol, al, snippet, hint = skill._generate_root_cause_analysis_groq(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert rc == "" and sol == ""
+        assert "400" in hint
+
+    def test_build_root_cause_prompt_max_attachment_chars_limits_content(self):
+        """max_attachment_chars overrides _MAX_ATTACHMENT_CHARS in the prompt."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        from skills.flaky_test_analysis.skill import AttachmentInfo
+
+        skill = FlakyTestAnalysisSkill()
+        # Create an attachment with content longer than the reduced limit
+        long_content = "x" * 5000
+        att = AttachmentInfo(
+            filename="log.txt",
+            mime_type="text/plain",
+            size=5000,
+            is_robot_xml=False,
+            text_content=long_content,
+        )
+
+        prompt_full = skill._build_root_cause_prompt(
+            issue={"key": "X-1", "status": "Open", "summary": "T"},
+            attachments=[att],
+            robot_runs=[],
+            flaky_metrics=[],
+        )
+        prompt_short = skill._build_root_cause_prompt(
+            issue={"key": "X-1", "status": "Open", "summary": "T"},
+            attachments=[att],
+            robot_runs=[],
+            flaky_metrics=[],
+            max_attachment_chars=500,
+        )
+
+        assert len(prompt_short) < len(prompt_full)
+        # Full 5000-char content must not appear; truncated 500-char version must
+        assert "x" * 5000 not in prompt_short
+        assert "x" * 500 in prompt_short
     """Tests for _build_root_cause_prompt, shared by all AI providers."""
 
     def _make_skill(self):
