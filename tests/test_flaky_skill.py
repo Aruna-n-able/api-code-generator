@@ -1223,11 +1223,107 @@ class TestOpenAISupport:
         skill = FlakyTestAnalysisSkill(openai_model="gpt-4-turbo")
         assert skill._openai_model == "gpt-4-turbo"
 
-    def test_openai_model_default_is_gpt4o(self):
-        """The default OpenAI model is gpt-4o."""
+    def test_openai_model_default_is_gpt4o_mini(self):
+        """The default OpenAI model is gpt-4o-mini (widely accessible, low cost)."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         skill = FlakyTestAnalysisSkill()
-        assert skill._openai_model == "gpt-4o"
+        assert skill._openai_model == "gpt-4o-mini"
+
+    # ------------------------------------------------------------------
+    # _build_model_list helper
+    # ------------------------------------------------------------------
+
+    def test_build_model_list_primary_not_in_fallbacks(self):
+        """When the primary model is not in _OPENAI_FALLBACK_MODELS, all fallbacks are appended."""
+        from skills.flaky_test_analysis.skill import _build_model_list
+        result = _build_model_list("gpt-4o")
+        assert result[0] == "gpt-4o"
+        assert "gpt-4o-mini" in result
+        assert "gpt-3.5-turbo" in result
+        # No duplicates
+        assert len(result) == len(set(result))
+
+    def test_build_model_list_primary_is_fallback(self):
+        """When the primary model is already in _OPENAI_FALLBACK_MODELS, no duplicates."""
+        from skills.flaky_test_analysis.skill import _build_model_list
+        result = _build_model_list("gpt-4o-mini")
+        assert result[0] == "gpt-4o-mini"
+        assert result.count("gpt-4o-mini") == 1
+
+    def test_build_model_list_last_fallback_as_primary(self):
+        """When the primary is the last fallback, the list still has no duplicates."""
+        from skills.flaky_test_analysis.skill import _build_model_list
+        result = _build_model_list("gpt-3.5-turbo")
+        assert result[0] == "gpt-3.5-turbo"
+        assert result.count("gpt-3.5-turbo") == 1
+
+    # ------------------------------------------------------------------
+    # model-not-found fallback in _generate_root_cause_analysis_openai
+    # ------------------------------------------------------------------
+
+    def test_root_cause_openai_falls_back_on_model_not_found(self):
+        """A 404 model-not-found error triggers a retry with the next fallback model."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        not_found_exc = self._make_openai_error(404, "The model `gpt-4o` does not exist")
+
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Timer drift.\n\n"
+            "**Recommended Solution:** Use monotonic clock."
+        )
+        success_response = MagicMock()
+        success_response.choices = [choice]
+
+        fake_openai = MagicMock()
+        # First call raises 404; second call succeeds
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = [
+            not_found_exc,
+            success_response,
+        ]
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test", openai_model="gpt-4o")
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            rc, sol, err = skill._generate_root_cause_analysis_openai(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert "Timer drift" in rc
+        assert "monotonic" in sol
+        assert err == ""
+        # create() should have been called twice (primary failed, fallback succeeded)
+        assert fake_openai.OpenAI.return_value.chat.completions.create.call_count == 2
+
+    def test_root_cause_openai_returns_error_when_all_models_fail(self):
+        """When every model in the fallback list raises 404, return an error hint."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        not_found_exc = self._make_openai_error(404, "The model does not exist")
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = not_found_exc
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test", openai_model="gpt-4o")
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            rc, sol, err = skill._generate_root_cause_analysis_openai(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert rc == ""
+        assert sol == ""
+        assert "model not found" in err
 
     # ------------------------------------------------------------------
     # _generate_root_cause_analysis_openai – happy path

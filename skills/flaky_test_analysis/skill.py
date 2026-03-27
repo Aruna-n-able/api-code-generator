@@ -59,6 +59,31 @@ try:
 except ImportError:
     _OPENAI_AVAILABLE = False
 
+# Ordered list of OpenAI models to try when the primary model is unavailable.
+# gpt-4o-mini is widely accessible (including accounts with limited credits);
+# gpt-3.5-turbo is the last-resort fallback for very restricted accounts.
+_OPENAI_FALLBACK_MODELS: List[str] = ["gpt-4o-mini", "gpt-3.5-turbo"]
+
+
+def _is_openai_model_not_found(exc: Exception) -> bool:
+    """Return True when *exc* indicates the requested OpenAI model is unavailable."""
+    msg = str(exc)
+    status = getattr(exc, "status_code", None)
+    return status == 404 or "model_not_found" in msg or "does not exist" in msg
+
+
+def _build_model_list(primary: str) -> List[str]:
+    """Return an ordered list of models to try, starting with *primary*.
+
+    Fallbacks from ``_OPENAI_FALLBACK_MODELS`` are appended only when they
+    differ from the primary model, so there are no duplicate attempts.
+    """
+    models = [primary]
+    for fallback in _OPENAI_FALLBACK_MODELS:
+        if fallback not in models:
+            models.append(fallback)
+    return models
+
 
 def _handle_anthropic_error(exc: Exception) -> str:
     """Log a clear, actionable message for an Anthropic API error.
@@ -131,7 +156,7 @@ def _handle_openai_error(exc: Exception) -> str:
             "  → Re-run with --no-ai to skip the AI step."
         )
         return "authentication error – check OPENAI_API_KEY"
-    elif status == 404 or "model_not_found" in msg or "does not exist" in msg:
+    elif _is_openai_model_not_found(exc):
         logger.error(
             "OpenAI API error: the requested model was not found.\n"
             "  → Verify the model name is correct and available in your account.\n"
@@ -258,7 +283,9 @@ class FlakyTestAnalysisSkill:
         Used as the AI provider when Anthropic is not configured or when it
         fails during a run.
     openai_model:
-        OpenAI model to use (default: ``gpt-4o``).
+        OpenAI model to use (default: ``gpt-4o-mini``).
+        If the requested model is not available on the account, the skill
+        automatically retries with ``gpt-4o-mini`` and then ``gpt-3.5-turbo``.
     patterns_file:
         Path to a custom ``flaky_patterns.yaml``; uses the bundled one by default.
     jira_client:
@@ -271,7 +298,7 @@ class FlakyTestAnalysisSkill:
         anthropic_api_key: Optional[str] = None,
         claude_model: str = "claude-sonnet-4-6",
         openai_api_key: Optional[str] = None,
-        openai_model: str = "gpt-4o",
+        openai_model: str = "gpt-4o-mini",
         patterns_file: Optional[str] = None,
         jira_client: Optional[JiraClient] = None,
     ) -> None:
@@ -448,17 +475,27 @@ class FlakyTestAnalysisSkill:
                 patterns = ", ".join(r.pattern_name for r in recs)
                 prompt_lines.append(f"  Patterns: {patterns}")
 
-        try:
-            client = _openai.OpenAI(api_key=self._openai_api_key)
-            response = client.chat.completions.create(
-                model=self._openai_model,
-                max_tokens=512,
-                messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
-            )
-            return response.choices[0].message.content or "" if response.choices else ""
-        except Exception as exc:
-            _handle_openai_error(exc)
-            return ""
+        client = _openai.OpenAI(api_key=self._openai_api_key)
+        prompt = "\n".join(prompt_lines)
+        models_to_try = _build_model_list(self._openai_model)
+        for model in models_to_try:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    max_tokens=512,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                if model != self._openai_model:
+                    logger.info("OpenAI: fell back to model '%s' for AI summary.", model)
+                return response.choices[0].message.content or "" if response.choices else ""
+            except Exception as exc:
+                if _is_openai_model_not_found(exc) and model != models_to_try[-1]:
+                    logger.warning(
+                        "OpenAI model '%s' not found; trying next fallback…", model
+                    )
+                    continue
+                _handle_openai_error(exc)
+                return ""
 
     # ------------------------------------------------------------------
     # Report formatting
@@ -1056,24 +1093,34 @@ class FlakyTestAnalysisSkill:
 
         prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
 
-        try:
-            client = _openai.OpenAI(api_key=self._openai_api_key)
-            response = client.chat.completions.create(
-                model=self._openai_model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            full_response = (
-                response.choices[0].message.content or ""
-                if response.choices
-                else ""
-            )
-        except Exception as exc:
-            error_hint = _handle_openai_error(exc)
-            return "", "", error_hint
-
-        root_cause, recommended_solution = self._parse_ai_response(full_response)
-        return root_cause, recommended_solution, ""
+        client = _openai.OpenAI(api_key=self._openai_api_key)
+        models_to_try = _build_model_list(self._openai_model)
+        for model in models_to_try:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    max_tokens=1024,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                if model != self._openai_model:
+                    logger.info(
+                        "OpenAI: fell back to model '%s' for root-cause analysis.", model
+                    )
+                full_response = (
+                    response.choices[0].message.content or ""
+                    if response.choices
+                    else ""
+                )
+                root_cause, recommended_solution = self._parse_ai_response(full_response)
+                return root_cause, recommended_solution, ""
+            except Exception as exc:
+                if _is_openai_model_not_found(exc) and model != models_to_try[-1]:
+                    logger.warning(
+                        "OpenAI model '%s' not found; trying next fallback…", model
+                    )
+                    continue
+                error_hint = _handle_openai_error(exc)
+                return "", "", error_hint
 
     @staticmethod
     def _parse_ai_response(response: str) -> Tuple[str, str]:

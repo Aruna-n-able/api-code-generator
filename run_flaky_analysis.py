@@ -156,10 +156,12 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--openai-model",
-        default="gpt-4o",
+        default="gpt-4o-mini",
         help="OpenAI model to use when OPENAI_API_KEY is set "
-             "(default: gpt-4o). Anthropic is tried first; OpenAI is "
-             "used as a fallback.",
+             "(default: gpt-4o-mini). Anthropic is tried first; OpenAI is "
+             "used as a fallback. If the chosen model is not available on your "
+             "account, the skill automatically falls back to gpt-4o-mini and "
+             "then gpt-3.5-turbo.",
     )
     parser.add_argument(
         "--patterns-file",
