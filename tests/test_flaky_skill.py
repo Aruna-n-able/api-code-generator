@@ -2319,6 +2319,22 @@ class TestHtmlReport:
         assert callable(render_html_report)
         assert callable(markdown_wrap)
 
+    def test_render_html_report_none_mime_type_does_not_crash(self):
+        """render_html_report must not crash when an attachment has mime_type=None."""
+        from skills.flaky_test_analysis import render_html_report, TicketAnalysisReport
+        from skills.flaky_test_analysis.skill import AttachmentInfo
+
+        att = AttachmentInfo(filename="report.zip", mime_type=None, size=1024)
+        report = TicketAnalysisReport(
+            issue_key="NCCF-42",
+            summary="Null mime type test",
+            status="Open",
+            attachments=[att],
+        )
+        html = render_html_report([report])
+        assert "NCCF-42" in html
+        assert "report.zip" in html
+
 
 # ===========================================================================
 # Feature: batch Jira ticket analysis (--jira-tickets)

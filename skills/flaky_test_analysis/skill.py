@@ -976,7 +976,7 @@ class FlakyTestAnalysisSkill:
 
         for att in raw_attachments:
             filename: str = att.get("filename", "attachment")
-            mime_type: str = att.get("mimeType", "")
+            mime_type: str = att.get("mimeType") or ""
             size: int = att.get("size", 0)
 
             logger.info("Downloading attachment: %s (%d bytes)", filename, size)
@@ -1187,7 +1187,6 @@ class FlakyTestAnalysisSkill:
         prompt_lines = [
             "",
             "You are a concise technical reporter for a QA automation team.",
-            "A Jenkins build has failed and a Jira ticket has been created automatically.",
             "",
             "IMPORTANT: Output ONLY the four labelled sections below.",
             "Do NOT include reasoning steps, chain-of-thought, 'Step N:' headers,",

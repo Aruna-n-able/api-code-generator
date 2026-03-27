@@ -462,7 +462,7 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
         for att in r.attachments:
             if att.is_robot_xml:
                 icon = "🤖"
-            elif att.filename.lower().endswith(".zip") or "zip" in att.mime_type.lower():
+            elif att.filename.lower().endswith(".zip") or "zip" in (att.mime_type or "").lower():
                 icon = "📦"
             else:
                 icon = "📄"
