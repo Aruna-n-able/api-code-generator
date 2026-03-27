@@ -321,3 +321,89 @@ patterns:
           return app.test_client()
       ```
     severity_weight: 2
+
+  - id: ui_element_timing
+    name: "UI Element Not Found / Browser Timing"
+    description: >
+      A Selenium or Browser Library keyword fails to find a page element because
+      the element has not yet rendered or the page has not fully loaded. Retrying
+      does not help when the root cause is a missing feature flag, incorrect
+      navigation, or an element that is conditionally hidden (e.g. when CMMC mode
+      is active). However, the same symptom also appears as a pure timing flake
+      when the page is slow to load.
+    keywords:
+      - selenium
+      - browser
+      - webdriver
+      - playwright
+      - page should contain
+      - page should not contain
+      - element should be visible
+      - element should not be visible
+      - wait until element
+      - wait for element
+      - wait until page contains
+    robot_keywords:
+      - Page Should Contain Element
+      - Page Should Not Contain Element
+      - Element Should Be Visible
+      - Element Should Not Be Visible
+      - Wait Until Element Is Visible
+      - Wait Until Page Contains Element
+      - Wait Until Page Contains
+      - Click Element
+      - Input Text
+      - SeleniumLibrary
+      - Browser
+    error_patterns:
+      - "Page should have contained element"
+      - "Page should not have contained element"
+      - "Element.*not found"
+      - "Element.*not visible"
+      - "failed after retrying"
+      - "NoSuchElementException"
+      - "ElementNotVisibleException"
+      - "ElementNotInteractableException"
+      - "StaleElementReferenceException"
+      - "TimeoutException"
+    fix_template: |
+      **If this is a timing / loading issue:**
+
+      Replace bare `Page Should Contain Element` with an explicit wait so Robot
+      Framework polls until the element appears rather than checking once and
+      retrying at a fixed interval:
+
+      ```robot
+      *** Settings ***
+      Library    SeleniumLibrary
+
+      *** Keywords ***
+      Wait And Verify Element Present
+          [Arguments]    ${locator}    ${timeout}=10s
+          Wait Until Page Contains Element    ${locator}    timeout=${timeout}
+          Element Should Be Visible           ${locator}
+      ```
+
+      Tune the `timeout` and `implicit_wait` values in your SeleniumLibrary
+      configuration rather than wrapping assertions in `Run Keyword And Ignore Error`.
+
+      **If the element is intentionally absent (e.g. hidden by a feature flag or
+      mode such as CMMC):**
+
+      Verify the test preconditions are correct. Ensure the application is in the
+      expected state *before* the assertion:
+
+      ```robot
+      *** Test Cases ***
+      Verify Element Not Present When CMMC Enabled
+          Given CMMC Mode Is Enabled
+          When Asset Info Is Updated
+          Then Page Should Not Contain Element    xpath://div[@data-service='warranty']
+      ```
+
+      Check whether the keyword name used in the test matches exactly (Robot
+      Framework keyword matching is case- and space-insensitive but the locator
+      must be correct). Use `SeleniumLibrary.Capture Page Screenshot` in a
+      `Test Teardown` to capture the browser state on failure for easier
+      debugging.
+    severity_weight: 3
