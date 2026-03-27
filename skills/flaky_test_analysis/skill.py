@@ -54,8 +54,12 @@ except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
 
-def _handle_anthropic_error(exc: Exception) -> None:
-    """Log a clear, actionable message for an Anthropic API error."""
+def _handle_anthropic_error(exc: Exception) -> str:
+    """Log a clear, actionable message for an Anthropic API error.
+
+    Returns a short, user-facing description of the error suitable for
+    inclusion in the formatted report.
+    """
     msg = str(exc)
     status = getattr(exc, "status_code", None)
     if "credit balance is too low" in msg:
@@ -65,11 +69,22 @@ def _handle_anthropic_error(exc: Exception) -> None:
             "  → Or re-run with --no-ai to skip the AI step and still get the "
             "pattern-based analysis."
         )
+        return "billing error – credit balance too low"
     elif status == 401 or "authentication" in msg.lower() or "api_key" in msg.lower():
         logger.error(
             "Anthropic API authentication failed – verify ANTHROPIC_API_KEY is correct.\n"
             "  → Re-run with --no-ai to skip the AI step."
         )
+        return "authentication error – check ANTHROPIC_API_KEY"
+    elif status == 404 or "model_not_found" in msg or "not_found_error" in msg:
+        logger.error(
+            "Anthropic API error: model '%s' was not found.\n"
+            "  → Verify the model name is correct and available in your account.\n"
+            "  → See https://docs.anthropic.com/en/docs/about-claude/models for valid IDs.\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            getattr(exc, "model", "unknown"),
+        )
+        return "model not found – check the model name"
     elif status is None:
         # Connection / timeout / other non-HTTP error
         logger.warning(
@@ -77,6 +92,7 @@ def _handle_anthropic_error(exc: Exception) -> None:
             "  → Re-run with --no-ai to skip the AI step.",
             exc,
         )
+        return "connection or timeout error"
     else:
         logger.warning(
             "Claude API error (HTTP %s): %s\n"
@@ -84,6 +100,7 @@ def _handle_anthropic_error(exc: Exception) -> None:
             status,
             exc,
         )
+        return f"API error (HTTP {status})"
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +542,9 @@ class FlakyTestAnalysisSkill:
         # ----------------------------------------------------------------
         root_cause = ""
         recommended_solution = ""
+        ai_error_hint = ""
         if use_ai and self._api_key and _ANTHROPIC_AVAILABLE:
-            root_cause, recommended_solution = self._generate_root_cause_analysis(
+            root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis(
                 issue, attachment_infos, robot_runs, flaky_metrics
             )
 
@@ -543,6 +561,7 @@ class FlakyTestAnalysisSkill:
             use_ai=use_ai,
             recommendations=ticket_recommendations,
             ai_key_set=bool(self._api_key),
+            ai_error_hint=ai_error_hint,
         )
 
         report = TicketAnalysisReport(
@@ -765,21 +784,22 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
-    ) -> Tuple[str, str]:
+    ) -> Tuple[str, str, str]:
         """
         Ask Claude to identify the root cause and recommend a fix.
 
-        Returns a tuple of (root_cause, recommended_solution) strings.
+        Returns a tuple of (root_cause, recommended_solution, error_hint) strings.
+        error_hint is non-empty only when the API call failed; it is a short,
+        user-facing description of what went wrong.
         """
         if not _ANTHROPIC_AVAILABLE:
             logger.warning(
                 "anthropic package not installed; skipping AI analysis. "
                 "Install with: pip install anthropic"
             )
-            return "", ""
+            return "", "", ""
 
         prompt_lines = [
-            "You are an expert in Robot Framework, Python testing, and CI/CD pipelines.",
             "",
             "A Jenkins build has failed and a Jira ticket has been created automatically.",
             "Your task is to:",
@@ -864,12 +884,12 @@ class FlakyTestAnalysisSkill:
 
             full_response = message.content[0].text if message.content else ""
         except Exception as exc:
-            _handle_anthropic_error(exc)
-            return "", ""
+            error_hint = _handle_anthropic_error(exc)
+            return "", "", error_hint
 
         # Split the response into root cause / solution sections
         root_cause, recommended_solution = self._parse_ai_response(full_response)
-        return root_cause, recommended_solution
+        return root_cause, recommended_solution, ""
 
     @staticmethod
     def _parse_ai_response(response: str) -> Tuple[str, str]:
@@ -917,6 +937,7 @@ class FlakyTestAnalysisSkill:
         use_ai: bool = True,
         recommendations: Optional[Dict[str, List[Recommendation]]] = None,
         ai_key_set: bool = False,
+        ai_error_hint: str = "",
     ) -> str:
         if recommendations is None:
             recommendations = {}
@@ -1007,13 +1028,18 @@ class FlakyTestAnalysisSkill:
             ]
         else:
             if ai_key_set:
-                lines += [
-                    "## 🔍 Root Cause",
-                    "",
-                    "_AI analysis failed. Check the logs for details (e.g. invalid model or "
-                    "API error). Re-run with `--no-ai` to skip the AI step._",
-                    "",
-                ]
+                if ai_error_hint:
+                    failure_msg = (
+                        f"_AI analysis failed ({ai_error_hint}). "
+                        "Re-run with `--no-ai` to skip the AI step._"
+                    )
+                else:
+                    failure_msg = (
+                        "_AI analysis failed. Check the logs for details "
+                        "(e.g. invalid model or API error). "
+                        "Re-run with `--no-ai` to skip the AI step._"
+                    )
+                lines += ["## 🔍 Root Cause", "", failure_msg, ""]
             else:
                 lines += [
                     "## 🔍 Root Cause",

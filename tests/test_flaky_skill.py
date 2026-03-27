@@ -705,7 +705,7 @@ class TestAnalyzeTicket:
             assert "Set `ANTHROPIC_API_KEY`" in report.formatted_report
 
     def test_analyze_ticket_ai_failure_shows_check_logs_message(self):
-        """When the key IS set but the AI call fails, show 'check logs' not 'set key'."""
+        """When the key IS set but the AI call fails, show the error cause not 'set key'."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         mock_jira = _make_jira_mock()
 
@@ -721,8 +721,9 @@ class TestAnalyzeTicket:
         assert report.root_cause == ""
         # Should NOT tell user to set the key (it is set)
         assert "Set `ANTHROPIC_API_KEY`" not in report.formatted_report
-        # Should tell user to check logs
-        assert "Check the logs" in report.formatted_report
+        # Should describe the specific failure cause in the report
+        assert "AI analysis failed" in report.formatted_report
+        assert "model not found" in report.formatted_report
 
     def test_analyze_ticket_ai_calls_claude_when_key_set(self):
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
@@ -1047,7 +1048,7 @@ class TestAnthropicErrorHandling:
 
     def test_root_cause_returns_empty_tuple_on_billing_error(self, caplog):
         """A 400 credit-balance error in _generate_root_cause_analysis must be
-        caught and return ('', '')."""
+        caught and return ('', '', <error_hint>)."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1071,7 +1072,9 @@ class TestAnthropicErrorHandling:
                 flaky_metrics=[],
             )
 
-        assert result == ("", "")
+        assert result[:2] == ("", "")
+        root_cause, recommended_solution, error_hint = result
+        assert error_hint  # billing error hint must be non-empty
 
     def test_auth_error_returns_empty_string(self, caplog):
         """A 401 authentication error must also be handled gracefully."""
@@ -1095,7 +1098,9 @@ class TestAnthropicErrorHandling:
                 flaky_metrics=[],
             )
 
-        assert result == ("", "")
+        assert result[:2] == ("", "")
+        root_cause, recommended_solution, error_hint = result
+        assert error_hint  # auth error hint must be non-empty
 
     def test_connection_error_returns_empty_tuple(self, caplog):
         """A non-HTTP error (connection / timeout) must also be caught gracefully."""
@@ -1118,7 +1123,9 @@ class TestAnthropicErrorHandling:
                 flaky_metrics=[],
             )
 
-        assert result == ("", "")
+        assert result[:2] == ("", "")
+        root_cause, recommended_solution, error_hint = result
+        assert error_hint  # connection error hint must be non-empty
 
     def test_ai_not_called_when_anthropic_unavailable(self):
         """When _ANTHROPIC_AVAILABLE is False, AI functions must not be called."""
