@@ -561,15 +561,29 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
         lang = lang_match.group(1) if lang_match else "robot"
         is_python = lang == "python"
         lines.append("<h2>💻 Corrected Code Snippet</h2>")
+        if is_python:
+            from .skill import FlakyTestAnalysisSkill as _Skill
+            src_snippet_text = (getattr(r, "robot_source_snippet", "") or "").strip()
+            py_libs = _Skill._extract_python_libraries(src_snippet_text) if src_snippet_text else []
+        else:
+            py_libs = []
         if src_file:
             src_filename = Path(src_file).name
             if is_python:
-                guidance = (
-                    f"⚠️ <strong>Where to apply this:</strong> This is Python code for a library or "
-                    f"keyword implementation. Open <code>{_e(src_filename)}</code>, find the "
-                    f"<code>Library</code> or <code>Resource</code> imports, and apply the changes "
-                    f"to the referenced Python file."
-                )
+                if py_libs:
+                    lib_list = ", ".join(f"<code>{_e(lib)}</code>" for lib in py_libs)
+                    guidance = (
+                        f"⚠️ <strong>Where to apply this:</strong> This is Python code. "
+                        f"Apply the changes to the Python library file(s) imported "
+                        f"in <code>{_e(src_filename)}</code>: {lib_list}."
+                    )
+                else:
+                    guidance = (
+                        f"⚠️ <strong>Where to apply this:</strong> This is Python code for a library or "
+                        f"keyword implementation. Open <code>{_e(src_filename)}</code>, find the "
+                        f"<code>Library</code> or <code>Resource</code> imports, and apply the changes "
+                        f"to the referenced Python file."
+                    )
             else:
                 guidance = (
                     f"📝 <strong>Where to apply this:</strong> Apply these changes in "
@@ -579,12 +593,20 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
         elif failing_test:
             inferred_file = f"{failing_test}.robot"
             if is_python:
-                guidance = (
-                    f"⚠️ <strong>Where to apply this:</strong> This is Python code for a library or "
-                    f"keyword implementation. Open <code>{_e(inferred_file)}</code>, find the "
-                    f"<code>Library</code> or <code>Resource</code> imports, and apply the changes "
-                    f"to the referenced Python file."
-                )
+                if py_libs:
+                    lib_list = ", ".join(f"<code>{_e(lib)}</code>" for lib in py_libs)
+                    guidance = (
+                        f"⚠️ <strong>Where to apply this:</strong> This is Python code. "
+                        f"Apply the changes to the Python library file(s) imported "
+                        f"in <code>{_e(inferred_file)}</code>: {lib_list}."
+                    )
+                else:
+                    guidance = (
+                        f"⚠️ <strong>Where to apply this:</strong> This is Python code for a library or "
+                        f"keyword implementation. Open <code>{_e(inferred_file)}</code>, find the "
+                        f"<code>Library</code> or <code>Resource</code> imports, and apply the changes "
+                        f"to the referenced Python file."
+                    )
             else:
                 guidance = (
                     f"📝 <strong>Where to apply this:</strong> Apply these changes in "

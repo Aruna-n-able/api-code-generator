@@ -1552,6 +1552,39 @@ class FlakyTestAnalysisSkill:
 
         return root_cause, recommended_solution, affected_line, code_snippet
 
+    @staticmethod
+    def _extract_python_libraries(robot_source_snippet: str) -> List[str]:
+        """Return the basenames of Python files imported via ``Library`` in a robot snippet.
+
+        Scans each line of *robot_source_snippet* for ``Library`` import
+        declarations that reference a ``.py`` file (e.g.
+        ``Library    ../libraries/TwoFactorAuthentication.py``).  Returns a
+        de-duplicated, order-preserved list of the basenames found (e.g.
+        ``["TwoFactorAuthentication.py"]``).
+
+        Lines are accepted in the standard ``| N │ content`` numbered format
+        produced by the GitHub fetcher as well as plain unnumbered text.
+        """
+        import re as _re
+
+        found: List[str] = []
+        seen: set = set()
+        for raw_line in robot_source_snippet.splitlines():
+            # Strip optional line-number prefix produced by the GitHub fetcher
+            # e.g. "  5 │ Library    ../libs/Foo.py"
+            line = _re.sub(r"^\s*\d+\s*│\s*", "", raw_line)
+            m = _re.match(
+                r"^\s*Library\s+([^\s#]+\.py)",
+                line,
+                _re.IGNORECASE,
+            )
+            if m:
+                basename = Path(m.group(1)).name
+                if basename not in seen:
+                    seen.add(basename)
+                    found.append(basename)
+        return found
+
     # ------------------------------------------------------------------
     # Ticket report formatting
     # ------------------------------------------------------------------
@@ -1741,14 +1774,27 @@ class FlakyTestAnalysisSkill:
         snippet = (code_snippet or "").strip()
         if snippet and snippet.upper() not in ("N/A", "NONE"):
             is_python = "```python" in snippet.lower()
+            py_libs = (
+                self._extract_python_libraries(robot_source_snippet)
+                if is_python and robot_source_snippet
+                else []
+            )
             if robot_source_file:
                 src_filename = Path(robot_source_file).name
                 if is_python:
-                    file_guidance = (
-                        f"> ⚠️ **Where to apply this:** This is Python code for a library or "
-                        f"keyword implementation. Open `{src_filename}`, find the `Library` or "
-                        f"`Resource` imports, and apply the changes to the referenced Python file."
-                    )
+                    if py_libs:
+                        lib_list = ", ".join(f"`{lib}`" for lib in py_libs)
+                        file_guidance = (
+                            f"> ⚠️ **Where to apply this:** This is Python code. "
+                            f"Apply the changes to the Python library file(s) imported "
+                            f"in `{src_filename}`: {lib_list}."
+                        )
+                    else:
+                        file_guidance = (
+                            f"> ⚠️ **Where to apply this:** This is Python code for a library or "
+                            f"keyword implementation. Open `{src_filename}`, find the `Library` or "
+                            f"`Resource` imports, and apply the changes to the referenced Python file."
+                        )
                 else:
                     file_guidance = (
                         f"> 📝 **Where to apply this:** Apply these changes in `{src_filename}`."
@@ -1756,11 +1802,19 @@ class FlakyTestAnalysisSkill:
             elif failing_test_name:
                 inferred_file = f"{failing_test_name}.robot"
                 if is_python:
-                    file_guidance = (
-                        f"> ⚠️ **Where to apply this:** This is Python code for a library or "
-                        f"keyword implementation. Open `{inferred_file}`, find the `Library` or "
-                        f"`Resource` imports, and apply the changes to the referenced Python file."
-                    )
+                    if py_libs:
+                        lib_list = ", ".join(f"`{lib}`" for lib in py_libs)
+                        file_guidance = (
+                            f"> ⚠️ **Where to apply this:** This is Python code. "
+                            f"Apply the changes to the Python library file(s) imported "
+                            f"in `{inferred_file}`: {lib_list}."
+                        )
+                    else:
+                        file_guidance = (
+                            f"> ⚠️ **Where to apply this:** This is Python code for a library or "
+                            f"keyword implementation. Open `{inferred_file}`, find the `Library` or "
+                            f"`Resource` imports, and apply the changes to the referenced Python file."
+                        )
                 else:
                     file_guidance = (
                         f"> 📝 **Where to apply this:** Apply these changes in `{inferred_file}`."

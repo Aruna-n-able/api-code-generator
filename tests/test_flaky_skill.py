@@ -3561,3 +3561,203 @@ class TestHtmlRobotTestFileAndSnippetGuidance:
         html = render_html_report([report])
         assert "Where to apply this" in html
         assert "Two Factor Authentication.robot" in html
+
+
+# ===========================================================================
+# Feature: _extract_python_libraries parses Library imports from robot snippet
+# ===========================================================================
+
+class TestExtractPythonLibraries:
+    """_extract_python_libraries returns .py filenames from Library import lines."""
+
+    def _extract(self, snippet):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill._extract_python_libraries(snippet)
+
+    def test_extracts_single_py_library(self):
+        snippet = "*** Settings ***\nLibrary    ../libraries/TwoFactorAuthentication.py"
+        assert self._extract(snippet) == ["TwoFactorAuthentication.py"]
+
+    def test_extracts_multiple_py_libraries(self):
+        snippet = (
+            "*** Settings ***\n"
+            "Library    ../libs/SeleniumHelper.py\n"
+            "Library    ../libs/AuthHelper.py\n"
+        )
+        result = self._extract(snippet)
+        assert result == ["SeleniumHelper.py", "AuthHelper.py"]
+
+    def test_ignores_non_py_libraries(self):
+        snippet = (
+            "*** Settings ***\n"
+            "Library    SeleniumLibrary\n"
+            "Library    Collections\n"
+            "Library    ../libs/MyHelper.py\n"
+        )
+        assert self._extract(snippet) == ["MyHelper.py"]
+
+    def test_ignores_resource_imports(self):
+        snippet = (
+            "*** Settings ***\n"
+            "Resource   ../resources/common.robot\n"
+            "Library    ../libs/Foo.py\n"
+        )
+        assert self._extract(snippet) == ["Foo.py"]
+
+    def test_strips_line_number_prefix(self):
+        # Numbered format produced by the GitHub fetcher
+        snippet = (
+            "  1 │ *** Settings ***\n"
+            "  2 │ Library    ../libs/TwoFactorAuthentication.py\n"
+            "  3 │ Library    SeleniumLibrary\n"
+        )
+        assert self._extract(snippet) == ["TwoFactorAuthentication.py"]
+
+    def test_deduplicates_same_library(self):
+        snippet = (
+            "Library    ../libs/Foo.py\n"
+            "Library    ../other/Foo.py\n"
+        )
+        # Both share the same basename; should appear only once
+        assert self._extract(snippet) == ["Foo.py"]
+
+    def test_empty_snippet_returns_empty_list(self):
+        assert self._extract("") == []
+
+    def test_no_library_imports_returns_empty_list(self):
+        snippet = "*** Test Cases ***\nVerify Login\n    Open Browser"
+        assert self._extract(snippet) == []
+
+
+# ===========================================================================
+# Feature: code snippet guidance names specific Python library files
+# ===========================================================================
+
+class TestSnippetGuidanceNamesLibraryFiles:
+    """When the robot source snippet contains Library imports of .py files,
+    the 'Where to apply this' guidance lists those specific filenames."""
+
+    def _make_skill(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill()
+
+    def _minimal_issue(self):
+        return {
+            "key": "NCCF-1", "summary": "Test", "status": "Open",
+            "description": "", "comments": [],
+        }
+
+    def _format(self, **kwargs):
+        skill = self._make_skill()
+        defaults = dict(
+            attachments=[], robot_runs=[], flaky_metrics=[],
+            root_cause="Root.", recommended_solution="Fix.", use_ai=False,
+        )
+        defaults.update(kwargs)
+        return skill._format_ticket_report(self._minimal_issue(), **defaults)
+
+    def test_python_snippet_with_library_import_names_py_file(self):
+        """When the robot source includes a .py Library import, the guidance
+        names that specific Python file."""
+        robot_src = (
+            "*** Settings ***\n"
+            "Library    ../libraries/TwoFactorAuthentication.py\n"
+            "Library    SeleniumLibrary\n"
+        )
+        report = self._format(
+            code_snippet="```python\nx = 1\n```",
+            robot_source_file="tests/two_factor_authentication.robot",
+            robot_source_snippet=robot_src,
+        )
+        assert "TwoFactorAuthentication.py" in report
+        assert "Where to apply this" in report
+
+    def test_python_snippet_with_multiple_library_imports_lists_all(self):
+        robot_src = (
+            "Library    ../libs/SeleniumHelper.py\n"
+            "Library    ../libs/AuthHelper.py\n"
+        )
+        report = self._format(
+            code_snippet="```python\nx = 1\n```",
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=robot_src,
+        )
+        assert "SeleniumHelper.py" in report
+        assert "AuthHelper.py" in report
+
+    def test_python_snippet_without_py_library_falls_back_to_generic_guidance(self):
+        """If no .py Library is found, the guidance still tells the user to
+        check the Library imports (generic fallback)."""
+        robot_src = "*** Settings ***\nLibrary    SeleniumLibrary\n"
+        report = self._format(
+            code_snippet="```python\nx = 1\n```",
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=robot_src,
+        )
+        assert "Where to apply this" in report
+        assert "Library" in report or "library" in report
+        # The specific guidance about checking imports should still appear
+        assert "login.robot" in report
+
+    def test_robot_snippet_does_not_parse_library_imports(self):
+        """Robot (non-Python) snippets never trigger library extraction for the guidance."""
+        # The robot source happens to import a .py library, but the code snippet is Robot.
+        # The guidance must use the simple "Apply these changes in <file>" form, NOT list
+        # the .py library as the target file.
+        robot_src = "Library    ../libs/Foo.py\n"
+        report = self._format(
+            code_snippet="```robot\nVerify Login\n    Open Browser\n```",
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=robot_src,
+        )
+        assert "Where to apply this" in report
+        # The guidance line should point to the .robot file, not list "Foo.py"
+        # (Foo.py may appear in the Failing Test Source section, but NOT in the guidance)
+        guidance_line = next(
+            (ln for ln in report.splitlines() if "Where to apply this" in ln), ""
+        )
+        assert "Foo.py" not in guidance_line
+        assert "login.robot" in guidance_line
+
+
+class TestHtmlSnippetGuidanceNamesLibraryFiles:
+    """HTML report guidance names specific Python library files when available."""
+
+    def _make_report(self, robot_source_file="", robot_source_snippet="",
+                     failing_test_name="", code_snippet=""):
+        from skills.flaky_test_analysis import TicketAnalysisReport
+        return TicketAnalysisReport(
+            issue_key="NCCF-1",
+            summary="Test",
+            status="Open",
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
+            failing_test_name=failing_test_name,
+            code_snippet=code_snippet,
+            formatted_report="",
+        )
+
+    def test_html_names_python_library_file_in_guidance(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            robot_source_file="tests/two_factor_authentication.robot",
+            robot_source_snippet=(
+                "*** Settings ***\n"
+                "Library    ../libraries/TwoFactorAuthentication.py\n"
+            ),
+            code_snippet="```python\ndriver.find_element(By.CSS_SELECTOR, '#login-button')\n```",
+        )
+        html = render_html_report([report])
+        assert "TwoFactorAuthentication.py" in html
+        assert "Where to apply this" in html
+
+    def test_html_fallback_when_no_py_library(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            robot_source_file="tests/login.robot",
+            robot_source_snippet="*** Settings ***\nLibrary    SeleniumLibrary\n",
+            code_snippet="```python\nx = 1\n```",
+        )
+        html = render_html_report([report])
+        assert "Where to apply this" in html
+        assert "login.robot" in html
