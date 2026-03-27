@@ -1,0 +1,55 @@
+export interface WsdlField {
+  name: string;
+  type: string;
+  required: boolean;
+  maxOccurs?: string;
+  documentation?: string;
+}
+
+export interface WsdlOperation {
+  name: string;
+  documentation?: string;
+  inputMessageName?: string;
+  outputMessageName?: string;
+  inputFields: WsdlField[];
+  outputFields: WsdlField[];
+}
+
+export interface WsdlInfo {
+  serviceName: string;
+  portName?: string;
+  targetNamespace?: string;
+  operations: WsdlOperation[];
+}
+
+export interface GeneratedFiles {
+  requestDto: string;
+  responseDto: string;
+  serviceInterface: string;
+  serviceImpl: string;
+  transformer: string;
+  controller: string;
+  apiClient: string;
+  jsClient: string;
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/** Supported code-generation target languages */
+export type Language = 'java' | 'python';
+
+export type CodeTab =
+  | 'requestDto'
+  | 'responseDto'
+  | 'serviceInterface'
+  | 'serviceImpl'
+  | 'transformer'
+  | 'controller'
+  | 'apiClient'
+  | 'jsClient';
+
+export type TestTab = 'unit' | 'robot';
+

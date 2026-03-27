@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>N-Central API Code Generator</title>
+<style>
+/* ── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --bg:       #0f172a;
+  --panel:    #1e293b;
+  --surface:  rgba(30,41,59,0.5);
+  --border:   #334155;
+  --border2:  #475569;
+  --text:     #e2e8f0;
+  --muted:    #94a3b8;
+  --dim:      #64748b;
+  --accent:   #7c3aed;
+  --accent2:  #8b5cf6;
+  --accent-bg:rgba(124,58,237,.15);
+  --green:    #10b981;
+  --amber:    #f59e0b;
+  --red:      #ef4444;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+body{display:flex;flex-direction:column}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
+header{
+  flex-shrink:0;display:flex;align-items:center;justify-content:space-between;
+  padding:0 1rem;height:56px;border-bottom:1px solid var(--border);
+  background:rgba(30,41,59,.8);backdrop-filter:blur(8px);
+  position:sticky;top:0;z-index:10;
+}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{width:32px;height:32px;border-radius:8px;background:var(--accent);
+  display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.logo h1{font-size:13px;font-weight:600;color:#fff;line-height:1.2}
+.logo p{font-size:11px;color:var(--dim);line-height:1.2}
+.hdr-actions{display:flex;align-items:center;gap:8px}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;
+  font-size:11px;background:var(--accent-bg);color:var(--accent2);border:1px solid rgba(139,92,246,.3)}
+
+/* ── Settings panel ─────────────────────────────────────────────────────────── */
+#settingsPanel{
+  border-top:1px solid var(--border);background:rgba(30,41,59,.9);padding:10px 16px;
+}
+#settingsPanel p{font-size:12px;color:var(--dim);margin-bottom:8px}
+
+/* ── Layout ─────────────────────────────────────────────────────────────────── */
+.layout{display:flex;flex:1;overflow:hidden}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────────── */
+aside{
+  width:272px;flex-shrink:0;border-right:1px solid var(--border);
+  background:rgba(30,41,59,.4);display:flex;flex-direction:column;
+  overflow-y:auto;padding:12px;gap:14px;
+}
+
+/* ── Main ────────────────────────────────────────────────────────────────────── */
+main{flex:1;overflow-y:auto;padding:24px}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────────── */
+.btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:6px 12px;border-radius:8px;border:1px solid var(--border);
+  background:var(--panel);color:var(--muted);cursor:pointer;
+  font-size:12px;font-family:inherit;transition:all .15s;white-space:nowrap;
+}
+.btn:hover{border-color:var(--border2);color:var(--text)}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn-primary{
+  background:var(--accent);border-color:var(--accent);color:#fff;
+  font-size:14px;font-weight:600;padding:10px 28px;
+}
+.btn-primary:hover:not(:disabled){background:var(--accent2);border-color:var(--accent2)}
+.btn-danger:hover{border-color:rgba(239,68,68,.5);color:#fca5a5}
+.btn-green{border-color:rgba(16,185,129,.4);color:#6ee7b7}
+.btn-green:hover{background:rgba(16,185,129,.08)}
+
+/* ── Inputs ──────────────────────────────────────────────────────────────────── */
+input[type=text],input[type=password]{
+  padding:7px 10px;border-radius:7px;border:1px solid var(--border);
+  background:rgba(15,23,42,.8);color:var(--text);font-family:inherit;
+  font-size:13px;outline:none;width:100%;transition:border-color .15s;
+}
+input[type=text]:focus,input[type=password]:focus{border-color:var(--accent2)}
+textarea{
+  width:100%;padding:8px;border-radius:8px;border:1px solid var(--border);
+  background:rgba(15,23,42,.8);color:var(--text);font-family:ui-monospace,monospace;
+  font-size:11px;resize:vertical;outline:none;transition:border-color .15s;
+}
+textarea:focus{border-color:var(--accent2)}
+
+/* ── Section label ───────────────────────────────────────────────────────────── */
+.label{font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+
+/* ── Card ────────────────────────────────────────────────────────────────────── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px}
+
+/* ── Language selector ───────────────────────────────────────────────────────── */
+.lang-row{display:flex;gap:6px}
+.lang-btn{
+  flex:1;padding:8px 10px;border-radius:10px;border:1px solid var(--border);
+  background:rgba(30,41,59,.5);color:var(--muted);cursor:pointer;
+  font-size:12px;font-family:inherit;text-align:left;transition:all .15s;
+}
+.lang-btn.active{background:var(--accent-bg);border-color:rgba(139,92,246,.6);color:#fff}
+.lang-btn:hover:not(.active){border-color:var(--border2)}
+.lang-sub{font-size:10px;color:var(--dim)}
+
+/* ── File drop ───────────────────────────────────────────────────────────────── */
+.file-drop{
+  border:2px dashed var(--border);border-radius:8px;padding:12px;
+  text-align:center;cursor:pointer;transition:all .15s;font-size:12px;color:var(--muted);
+}
+.file-drop:hover{border-color:var(--accent2);background:var(--accent-bg)}
+
+/* ── Op list ─────────────────────────────────────────────────────────────────── */
+.op-item{
+  padding:8px 10px;border-radius:8px;cursor:pointer;
+  border:1px solid transparent;transition:all .15s;font-size:12px;
+}
+.op-item:hover{background:rgba(30,41,59,.8);border-color:var(--border)}
+.op-item.active{background:var(--accent-bg);border-color:rgba(139,92,246,.5);color:#fff}
+.op-name{font-weight:500}
+.op-doc{font-size:11px;color:var(--dim);margin-top:2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+
+/* ── Tabs ────────────────────────────────────────────────────────────────────── */
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px}
+.tab{
+  padding:5px 11px;border-radius:6px;border:1px solid var(--border);
+  background:transparent;color:var(--muted);cursor:pointer;
+  font-size:11px;font-family:inherit;transition:all .15s;
+}
+.tab.active{background:var(--accent-bg);border-color:rgba(139,92,246,.5);color:#fff}
+.tab:hover:not(.active){border-color:var(--border2);color:var(--text)}
+
+/* ── Code block ──────────────────────────────────────────────────────────────── */
+pre{
+  background:rgba(15,23,42,.9);border:1px solid var(--border);border-radius:8px;
+  padding:14px;overflow:auto;max-height:480px;
+}
+code{font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:12px;line-height:1.65;color:#e2e8f0;white-space:pre}
+.code-actions{display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px}
+
+/* ── Chat ────────────────────────────────────────────────────────────────────── */
+.chat-log{display:flex;flex-direction:column;gap:10px;max-height:300px;overflow-y:auto;padding:2px 0}
+.msg{display:flex;gap:8px}
+.msg-user{flex-direction:row-reverse}
+.bubble{max-width:80%;padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.5}
+.msg-user .bubble{background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px}
+.msg-bot  .bubble{background:var(--panel);border:1px solid var(--border);border-radius:12px 12px 12px 4px}
+.chat-bar{display:flex;gap:8px;margin-top:10px}
+.chat-bar input{flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(15,23,42,.8);color:var(--text);font-family:inherit;font-size:13px;outline:none}
+.chat-bar input:focus{border-color:var(--accent2)}
+
+/* ── Field table ─────────────────────────────────────────────────────────────── */
+.ftable{width:100%;border-collapse:collapse;font-size:12px}
+.ftable th{color:var(--dim);font-weight:600;text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)}
+.ftable td{padding:4px 8px;border-bottom:1px solid rgba(51,65,85,.5)}
+.ftype{font-family:ui-monospace,monospace;color:#a78bfa;font-size:11px}
+.freq{color:var(--green);font-size:10px}
+
+/* ── Alert ───────────────────────────────────────────────────────────────────── */
+.alert{padding:8px 12px;border-radius:8px;font-size:12px}
+.alert-err{border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.05);color:#fca5a5}
+.alert-warn{border:1px solid rgba(245,158,11,.3);background:rgba(245,158,11,.05);color:var(--amber)}
+
+/* ── Welcome ─────────────────────────────────────────────────────────────────── */
+.welcome-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;max-width:560px;margin:0 auto}
+
+/* ── Spinner ─────────────────────────────────────────────────────────────────── */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+
+/* ── Locked ──────────────────────────────────────────────────────────────────── */
+.locked{opacity:.45;pointer-events:none}
+
+/* ── Satisfied badge ─────────────────────────────────────────────────────────── */
+.sat-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:12px;background:rgba(16,185,129,.1);color:#6ee7b7;border:1px solid rgba(16,185,129,.3)}
+
+/* ── Field section ───────────────────────────────────────────────────────────── */
+.fsec{display:flex;flex-direction:column;gap:8px}
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <div>
+      <h1>API Code Generator</h1>
+      <p id="hdrSub">N-Central WSDL → REST</p>
+    </div>
+  </div>
+  <div class="hdr-actions">
+    <span id="hdrBadge" class="badge" style="display:none"></span>
+    <button class="btn" onclick="toggleSettings()">⚙ Settings</button>
+    <button class="btn btn-danger" id="resetBtn" onclick="doReset()" style="display:none">↺ Reset</button>
+  </div>
+</header>
+
+<!-- ── SETTINGS PANEL ─────────────────────────────────────────────────────────── -->
+<div id="settingsPanel" style="display:none">
+  <p>Configure the AI provider used for code refinement and test generation. Free options are available — no credit card required.</p>
+
+  <div style="display:flex;flex-direction:column;gap:12px;max-width:520px">
+
+    <!-- Provider selector -->
+    <label style="font-size:12px;color:var(--muted)">AI Provider</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap" id="providerBtns">
+      <button class="btn" id="pBtn-ollama"  onclick="setProvider('ollama')" title="Local, completely free">🖥 Ollama (Local · Free)</button>
+      <button class="btn" id="pBtn-groq"    onclick="setProvider('groq')"   title="Free cloud API key from console.groq.com">⚡ Groq (Free)</button>
+      <button class="btn" id="pBtn-gemini"  onclick="setProvider('gemini')" title="Free cloud API key from aistudio.google.com">✦ Gemini (Free)</button>
+      <button class="btn" id="pBtn-openai"  onclick="setProvider('openai')" title="Paid — requires OpenAI credits">🔑 OpenAI (Paid)</button>
+    </div>
+
+    <!-- Ollama URL (shown only for Ollama) -->
+    <div id="ollamaUrlRow">
+      <label style="font-size:12px;color:var(--muted)">Ollama server URL</label>
+      <input type="text" id="ollamaUrlInput" placeholder="http://localhost:11434"
+        style="width:100%;max-width:400px;margin-top:4px"
+        oninput="S.ollamaUrl=this.value">
+      <p style="font-size:11px;color:var(--dim);margin-top:6px">
+        Install Ollama free at <a href="https://ollama.com" target="_blank" rel="noopener" style="color:var(--accent)">ollama.com</a>,
+        then run <code style="font-size:11px">ollama pull llama3</code>.
+        No API key or internet access needed.
+      </p>
+    </div>
+
+    <!-- API key (shown for cloud providers) -->
+    <div id="apiKeyRow" style="display:none">
+      <label id="apiKeyLabel" style="font-size:12px;color:var(--muted)">API Key</label>
+      <input type="password" id="apiKeyInput" placeholder="Enter your free API key…"
+        style="width:100%;max-width:400px;margin-top:4px"
+        oninput="S.apiKey=this.value">
+      <p id="apiKeyHint" style="font-size:11px;color:var(--dim);margin-top:6px"></p>
+    </div>
+
+    <!-- Model override (always visible) -->
+    <div>
+      <label style="font-size:12px;color:var(--muted)">Model <span style="color:var(--dim)">(leave blank for default)</span></label>
+      <input type="text" id="modelInput" placeholder="e.g. llama3, mixtral-8x7b-32768, gemini-1.5-flash…"
+        style="width:100%;max-width:400px;margin-top:4px"
+        oninput="S.model=this.value">
+    </div>
+
+  </div>
+
+  <!-- ── GitHub reference repo access ───────────────────────────────────────── -->
+  <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+  <div style="display:flex;flex-direction:column;gap:10px;max-width:520px">
+    <label style="font-size:12px;color:var(--muted)">Reference Repository (nable-nc/api-service)</label>
+
+    <!-- Credential inputs -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <input type="text" id="ghUsernameInput" placeholder="GitHub username"
+        style="flex:1;min-width:140px;max-width:200px">
+      <input type="password" id="ghTokenInput" placeholder="Personal access token (repo read)"
+        style="flex:2;min-width:200px">
+      <button class="btn" id="ghConnectBtn" onclick="ghConnect()" style="white-space:nowrap">
+        🔗 Connect
+      </button>
+    </div>
+    <p id="ghConnectMsg" style="font-size:11px;margin:0;display:none"></p>
+
+    <!-- Status row -->
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span id="ghStatusBadge" style="font-size:12px;padding:3px 8px;border-radius:999px;background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.3)">
+        ⚠ Not configured
+      </span>
+      <span id="ghStatusUser" style="font-size:11px;color:var(--dim)"></span>
+      <button class="btn" id="ghBrowseBtn" onclick="openGhBrowser()" disabled title="Configure GitHub credentials to browse">
+        📂 Browse Reference Repo
+      </button>
+    </div>
+    <p style="font-size:11px;color:var(--dim);margin:0">
+      Enter your GitHub username and a
+      <a href="https://github.com/settings/tokens" target="_blank" rel="noopener" style="color:var(--accent)">Personal Access Token</a>
+      (read-only <code style="font-size:11px">repo</code> scope) to browse the private reference repository.
+      You can also set <code style="font-size:11px">GITHUB_USERNAME</code> / <code style="font-size:11px">GITHUB_TOKEN</code>
+      in your <code style="font-size:11px">.env</code> file before starting the server.
+    </p>
+  </div>
+</div>
+
+<!-- ── GITHUB BROWSER MODAL ───────────────────────────────────────────────── -->
+<div id="ghBrowserModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:min(820px,96vw);max-height:86vh;display:flex;flex-direction:column;overflow:hidden">
+    <!-- Modal header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border)">
+      <div>
+        <span style="font-weight:600;font-size:15px">📦 nable-nc / api-service</span>
+        <span id="ghBreadcrumb" style="font-size:12px;color:var(--dim);margin-left:10px"></span>
+      </div>
+      <button class="btn" onclick="closeGhBrowser()">✕ Close</button>
+    </div>
+    <!-- Body: split into file list + preview -->
+    <div style="display:flex;flex:1;overflow:hidden;min-height:0">
+      <!-- File list -->
+      <div id="ghFileList" style="width:260px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;padding:8px 0;font-size:13px">
+        <p style="padding:8px 12px;color:var(--dim)">Loading…</p>
+      </div>
+      <!-- File content preview -->
+      <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+        <div id="ghPreviewBar" style="display:none;padding:6px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0">
+          <span id="ghPreviewName" style="font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <button class="btn btn-green" onclick="ghUseAsRef()" title="Pin this file as reference — the code generator will align imports and patterns with it">📌 Use as Reference</button>
+          <button class="btn" onclick="ghCopyContent()">📋 Copy</button>
+        </div>
+        <pre id="ghPreviewCode" style="flex:1;overflow:auto;margin:0;padding:16px;font-size:12px;line-height:1.6;white-space:pre;background:transparent;color:var(--text)"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="layout">
+
+  <!-- ── SIDEBAR ──────────────────────────────────────────────────────────────── -->
+  <aside>
+
+    <!-- Language -->
+    <div class="fsec">
+      <span class="label">Target Language</span>
+      <div class="lang-row">
+        <button class="lang-btn" id="langJava" onclick="setLang('java')">
+          ☕ Java<br><span class="lang-sub">Spring Boot</span>
+        </button>
+        <button class="lang-btn" id="langPy" onclick="setLang('python')">
+          🐍 Python<br><span class="lang-sub">FastAPI</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- WSDL input -->
+    <div class="fsec">
+      <span class="label">WSDL Input</span>
+      <div class="file-drop" onclick="document.getElementById('fi').click()">
+        📂 Upload WSDL file
+        <input type="file" id="fi" accept=".wsdl,.xml" style="display:none" onchange="loadFile(event)">
+      </div>
+      <textarea id="wsdlBox" rows="7" placeholder="Or paste WSDL XML here…"></textarea>
+      <button class="btn btn-primary" onclick="doParse()" style="justify-content:center">Parse WSDL</button>
+      <div id="parseErr" class="alert alert-err" style="display:none"></div>
+    </div>
+
+    <!-- Operations -->
+    <div id="opsSection" class="fsec" style="display:none">
+      <span class="label">Operations (<span id="opsCount">0</span>)</span>
+      <div id="opsList"></div>
+    </div>
+
+  </aside>
+
+  <!-- ── MAIN ──────────────────────────────────────────────────────────────────── -->
+  <main id="mainArea"></main>
+
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+const S = {
+  wsdl:      null,   // {serviceName, operations:[]}
+  op:        null,   // selected operation object
+  lang:      'java', // 'java' | 'python'
+  stage:     'idle', // 'idle'|'generating'|'generated'|'satisfied'
+  files:     null,   // {requestDto,responseDto,serviceInterface,serviceImpl,transformer,controller}
+  chat:      [],     // [{role,content}]
+  ghRef:     {path:'', content:''},  // reference file pinned from the api-service repo
+  // LLM provider settings
+  provider:  'ollama',              // 'ollama'|'groq'|'gemini'|'openai'
+  apiKey:    '',                    // API key for cloud providers
+  ollamaUrl: 'http://localhost:11434', // base URL for local Ollama
+  model:     '',                    // override model (empty = use provider default)
+  settOpen:  false,
+  codeTab:   'controller',
+  testTab:   'unit',
+  unitTests: '',
+  robotTests:'',
+  testStage: 'idle', // 'idle'|'generating'|'generated'
+  chatBusy:  false,
+  aiBusy:    false,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function esc(s){ return s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
+function pascal(s){ return s?s[0].toUpperCase()+s.slice(1):s }
+function snake(s){ return s?s.replace(/([A-Z])/g,(a,c,i)=>(i>0?'_':'')+c.toLowerCase()).replace(/^_/,''):s }
+async function post(url,data){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});return r.json() }
+
+function langLabel(){ return S.lang==='java'?'☕ Java':'🐍 Python' }
+function langDesc(){ return S.lang==='java'?'Spring Boot 3 · Lombok · Jakarta EE':'FastAPI · Pydantic v2 · zeep' }
+
+const CODE_TABS = ['controller','serviceInterface','serviceImpl','transformer','requestDto','responseDto','apiClient','jsClient'];
+const TAB_NAMES = {
+  controller:       {java:'Controller',      python:'Router'},
+  serviceInterface: {java:'Service',         python:'Service Base'},
+  serviceImpl:      {java:'ServiceImpl',     python:'Service'},
+  transformer:      {java:'Transformer',     python:'Transformer'},
+  requestDto:       {java:'RequestDTO',      python:'RequestSchema'},
+  responseDto:      {java:'ResponseDTO',     python:'ResponseSchema'},
+  apiClient:        {java:'SoapUI',      python:'API Client'},
+  jsClient:         {java:'JS Client',       python:'JS Client'},
+};
+function tabLabel(t){ return TAB_NAMES[t][S.lang] }
+function tabFilename(t,opName){
+  const p=pascal(opName), sn=snake(opName);
+  const map={
+    controller:      S.lang==='java'?p+'Controller.java':sn+'_router.py',
+    serviceInterface:S.lang==='java'?p+'Service.java':sn+'_service_base.py',
+    serviceImpl:     S.lang==='java'?p+'ServiceImpl.java':sn+'_service.py',
+    transformer:     S.lang==='java'?p+'Transformer.java':sn+'_transformer.py',
+    requestDto:      S.lang==='java'?p+'Request.java':sn+'_request.py',
+    responseDto:     S.lang==='java'?p+'Response.java':sn+'_response.py',
+    apiClient:       S.lang==='java'?p+'SoapUI.java':sn+'_client.py',
+    jsClient:        sn+'_client.js',
+  };
+  return map[t];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Header + sidebar updates (lightweight, no full re-render)
+// ─────────────────────────────────────────────────────────────────────────────
+function updateHeader(){
+  const badge=document.getElementById('hdrBadge');
+  const resetBtn=document.getElementById('resetBtn');
+  const sub=document.getElementById('hdrSub');
+  if(S.wsdl){
+    badge.style.display='';
+    badge.textContent=`${S.wsdl.serviceName} · ${S.wsdl.operations.length} ops · ${langLabel()}`;
+    resetBtn.style.display='';
+    sub.textContent=`${langLabel()} REST`;
+  } else {
+    badge.style.display='none';
+    resetBtn.style.display='none';
+    sub.textContent='N-Central WSDL → REST';
+  }
+}
+
+function updateLangBtns(){
+  document.getElementById('langJava').className='lang-btn'+(S.lang==='java'?' active':'');
+  document.getElementById('langPy').className='lang-btn'+(S.lang==='python'?' active':'');
+}
+
+function updateOpsList(){
+  const sec=document.getElementById('opsSection');
+  if(!S.wsdl){ sec.style.display='none'; return; }
+  sec.style.display='';
+  document.getElementById('opsCount').textContent=S.wsdl.operations.length;
+  const list=document.getElementById('opsList');
+  list.innerHTML=S.wsdl.operations.map(op=>`
+    <div class="op-item${S.op&&S.op.name===op.name?' active':''}" data-op="${esc(op.name)}" onclick="pickOp(this.dataset.op)">
+      <div class="op-name">${esc(op.name)}</div>
+      ${op.documentation?`<div class="op-doc">${esc(op.documentation)}</div>`:''}
+    </div>
+  `).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main area rendering
+// ─────────────────────────────────────────────────────────────────────────────
+function renderMain(){
+  const el=document.getElementById('mainArea');
+  if(!S.wsdl){ el.innerHTML=renderWelcome(); return; }
+  if(!S.op)  { el.innerHTML=renderPickOp(); return; }
+  el.innerHTML=renderOpView();
+  // bind chat enter
+  const ci=document.getElementById('chatIn');
+  if(ci) ci.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); doChat(); } });
+}
+
+function render(){
+  updateHeader();
+  updateLangBtns();
+  updateOpsList();
+  renderMain();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Screens
+// ─────────────────────────────────────────────────────────────────────────────
+function renderWelcome(){
+  return `
+  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:65vh;gap:24px;text-align:center;padding:32px">
+    <div style="width:64px;height:64px;border-radius:16px;background:var(--accent-bg);border:1px solid rgba(139,92,246,.3);display:flex;align-items:center;justify-content:center;font-size:28px">⚡</div>
+    <div>
+      <h2 style="font-size:22px;font-weight:700;color:#fff;margin-bottom:8px">N-Central API Code Generator</h2>
+      <p style="color:var(--muted);max-width:480px;line-height:1.65">
+        Upload or paste an N-Central WSDL file, pick an operation, and generate a complete
+        REST API in <strong style="color:var(--text)">Java (Spring Boot)</strong> or
+        <strong style="color:var(--text)">Python (FastAPI)</strong>.
+      </p>
+    </div>
+    <div class="welcome-grid">
+      ${[['📄','Upload WSDL','Parse N-Central WSDL to extract all operations with request/response field definitions'],
+         ['⚡','Generate Code','Create Controller, Service, Transformer, DTO classes, API Client and JS Client in Java or Python'],
+         ['🧪','Generate Tests','Produce JUnit 5 / pytest unit tests and Robot Framework acceptance tests'],
+        ].map(([i,t,d])=>`
+        <div class="card">
+          <div style="font-size:24px;margin-bottom:8px">${i}</div>
+          <h3 style="font-size:13px;font-weight:600;color:#fff;margin-bottom:4px">${t}</h3>
+          <p style="font-size:12px;color:var(--dim);line-height:1.5">${d}</p>
+        </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function renderPickOp(){
+  return `
+  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:65vh;gap:16px;text-align:center;padding:32px">
+    <div style="font-size:36px">🔍</div>
+    <h2 style="font-size:17px;font-weight:600;color:#fff">Select an operation</h2>
+    <p style="color:var(--muted);font-size:13px">Choose one of the ${S.wsdl.operations.length} operations from the sidebar.</p>
+    <div style="font-size:12px;color:var(--dim);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 16px">
+      Generating ${langLabel()} · ${langDesc()}
+    </div>
+  </div>`;
+}
+
+function renderOpView(){
+  const op=S.op;
+  const isGen = S.stage==='generated'||S.stage==='satisfied';
+  const isSat = S.stage==='satisfied';
+  return `
+  <div style="display:flex;flex-direction:column;gap:20px;max-width:940px">
+
+    <!-- Operation detail -->
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2 style="font-size:15px;font-weight:600;color:#fff">${esc(op.name)}</h2>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          ${S.ghRef.content?`<span style="font-size:11px;padding:3px 8px;border-radius:999px;background:rgba(16,185,129,.15);color:#6ee7b7;border:1px solid rgba(16,185,129,.3);display:inline-flex;align-items:center;gap:4px">📌 ${esc(S.ghRef.path.split('/').pop())}<button onclick="S.ghRef={path:'',content:''};render()" style="background:none;border:none;cursor:pointer;color:inherit;padding:0;margin-left:2px;line-height:1" title="Clear reference">✕</button></span>`:''}
+          <span class="badge">${langLabel()}</span>
+        </div>
+      </div>
+      ${op.documentation?`<p style="font-size:12px;color:var(--dim);margin-bottom:12px">${esc(op.documentation)}</p>`:''}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        ${fieldTable('Input Fields', op.inputFields)}
+        ${fieldTable('Output Fields', op.outputFields)}
+      </div>
+    </div>
+
+    <!-- Generate button -->
+    ${!isGen?`
+    <div style="display:flex;flex-direction:column;align-items:center;gap:8px">
+      <button class="btn btn-primary" onclick="doGenerate()" ${S.stage==='generating'?'disabled':''}>
+        ${S.stage==='generating'?'<span class="spin"></span> Generating…':'⚡ Implement REST API'}
+      </button>
+      <p style="font-size:12px;color:var(--dim)">Will generate ${langLabel()} · ${langDesc()}</p>
+    </div>`:''}
+
+    <!-- Generated code -->
+    ${isGen&&S.files?`
+    <div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <h3 style="font-size:13px;font-weight:600;color:#fff">⚡ Generated Implementation <span style="font-size:12px;font-weight:400;color:var(--muted)">(${langLabel()})</span></h3>
+        <button class="btn" onclick="doGenerate()">↺ Regenerate</button>
+      </div>
+      <div class="card">
+        <div class="tabs" id="codeTabs">
+          ${CODE_TABS.map(t=>`
+            <button class="tab${S.codeTab===t?' active':''}" onclick="setCodeTab('${t}')">${tabLabel(t)}</button>
+          `).join('')}
+        </div>
+        <div class="code-actions">
+          <button class="btn" onclick="doDownload(tabFilename(S.codeTab,S.op.name),activeCode())">⬇ Download</button>
+          <button class="btn" onclick="doCopy(activeCode(),this)">⧉ Copy</button>
+        </div>
+        <pre><code id="codeDisp">${esc(activeCode())}</code></pre>
+      </div>
+    </div>
+
+    <!-- AI Chat -->
+    <div class="card">
+      <h3 style="font-size:13px;font-weight:600;color:#fff;margin-bottom:12px">
+        💬 Refine with AI
+        ${!_aiEnabled()?'<span style="font-size:11px;font-weight:400;color:var(--amber);margin-left:8px">(configure AI provider in ⚙ Settings to enable)</span>':''}
+      </h3>
+      ${S.chat.length?`
+      <div class="chat-log" id="chatLog">
+        ${S.chat.map(m=>`
+          <div class="msg msg-${m.role==='user'?'user':'bot'}">
+            <div class="bubble">${esc(m.content).replace(/\n/g,'<br>')}</div>
+          </div>`).join('')}
+      </div>`:'<p style="font-size:12px;color:var(--dim);margin-bottom:8px">Ask the AI to improve the generated code — add error handling, input validation, logging, etc.</p>'}
+      <div class="chat-bar">
+        <input type="text" id="chatIn" placeholder="e.g. Add comprehensive error handling and validation…" ${!_aiEnabled()||S.chatBusy?'disabled':''}>
+        <button class="btn btn-primary" onclick="doChat()" ${!_aiEnabled()||S.chatBusy?'disabled':''} style="padding:8px 16px">
+          ${S.chatBusy?'<span class="spin"></span>':'Send'}
+        </button>
+      </div>
+      ${!isSat?`
+      <div style="margin-top:12px;text-align:center">
+        <button class="btn btn-green" onclick="doSatisfied()">✅ Approve Code</button>
+        <p style="font-size:11px;color:var(--dim);margin-top:6px">Approving the code unlocks test generation.</p>
+      </div>`:''}
+      ${isSat?`<div class="sat-badge" style="margin-top:10px">✅ Code approved — test generation unlocked</div>`:''}
+    </div>
+
+    <!-- Tests -->
+    ${isSat?renderTests(op):`
+    <div class="card locked" style="display:flex;align-items:center;gap:12px">
+      <span style="font-size:28px">🧪</span>
+      <div>
+        <p style="font-size:13px;font-weight:500;color:var(--muted)">Test generation locked</p>
+        <p style="font-size:12px;color:var(--dim);margin-top:2px">Click "Approve Code" in the code panel to unlock.</p>
+      </div>
+    </div>`}
+    `:''}
+  </div>`;
+}
+
+function renderTests(op){
+  const hasTests = S.testStage==='generated';
+  const testFilename = S.testTab==='unit'
+    ? (S.lang==='java'?pascal(op.name)+'ServiceImplTest.java':'test_'+snake(op.name)+'_service.py')
+    : pascal(op.name)+'Tests.robot';
+  return `
+  <div class="card" style="border-color:rgba(16,185,129,.25)">
+    <h3 style="font-size:13px;font-weight:600;color:#fff;margin-bottom:12px">🧪 Test Generation</h3>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button class="btn" onclick="doGenTests()" ${S.testStage==='generating'?'disabled':''}>
+        ${S.testStage==='generating'?'<span class="spin"></span> Generating…':'📋 Generate Template Tests'}
+      </button>
+      ${_aiEnabled()?`
+      <button class="btn" onclick="doAiTests()" ${S.aiBusy?'disabled':''}>
+        ${S.aiBusy?'<span class="spin"></span>':'🤖'} AI-Enhanced Tests
+      </button>`:'<span style="font-size:11px;color:var(--dim)">Configure AI provider in ⚙ Settings for AI-enhanced tests</span>'}    </div>
+    ${hasTests?`
+    <div class="tabs">
+      <button class="tab${S.testTab==='unit'?' active':''}" onclick="setTestTab('unit')">${S.lang==='java'?'JUnit 5':'pytest'}</button>
+      <button class="tab${S.testTab==='robot'?' active':''}" onclick="setTestTab('robot')">Robot Framework</button>
+    </div>
+    <div class="code-actions">
+      <button class="btn" onclick="doDownload('${esc(testFilename)}',activeTestCode())">⬇ Download</button>
+      <button class="btn" onclick="doCopy(activeTestCode(),this)">⧉ Copy</button>
+    </div>
+    <pre><code>${esc(activeTestCode())}</code></pre>
+    `:`<p style="font-size:12px;color:var(--dim)">Click "Generate Template Tests" for ready-to-use test files, or use AI-Enhanced Tests for more comprehensive coverage.</p>`}
+  </div>`;
+}
+
+function fieldTable(title, fields){
+  if(!fields||!fields.length) return `<div><p style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">${title}</p><p style="font-size:11px;color:var(--dim)">No fields</p></div>`;
+  return `
+  <div>
+    <p style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">${title}</p>
+    <table class="ftable">
+      <tr><th>Name</th><th>Type</th><th>Req</th></tr>
+      ${fields.map(f=>`
+        <tr>
+          <td>${esc(f.name)}</td>
+          <td class="ftype">${esc(f.type)}</td>
+          <td class="freq">${f.required?'✓':'○'}</td>
+        </tr>`).join('')}
+    </table>
+  </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Code helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function activeCode(){ return S.files?S.files[S.codeTab]||'':'' }
+function activeTestCode(){ return S.testTab==='unit'?S.unitTests:S.robotTests }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Actions
+// ─────────────────────────────────────────────────────────────────────────────
+// ─── Provider hints shown in the settings panel ───────────────────────────────
+const _PROVIDER_HINTS = {
+  groq:   { label:'Groq API Key', hint:'Get a free key at <a href="https://console.groq.com" target="_blank" rel="noopener" style="color:var(--accent)">console.groq.com</a>. No credit card required.' },
+  gemini: { label:'Gemini API Key', hint:'Get a free key at <a href="https://aistudio.google.com" target="_blank" rel="noopener" style="color:var(--accent)">aistudio.google.com</a>. Generous free quota.' },
+  openai: { label:'OpenAI API Key', hint:'Requires credits. Visit <a href="https://platform.openai.com" target="_blank" rel="noopener" style="color:var(--accent)">platform.openai.com</a>.' },
+};
+
+function _aiEnabled(){ return S.provider==='ollama' || !!S.apiKey; }
+
+function setProvider(p){
+  S.provider=p;
+  const isOllama = p==='ollama';
+  document.getElementById('ollamaUrlRow').style.display = isOllama ? '' : 'none';
+  document.getElementById('apiKeyRow').style.display    = isOllama ? 'none' : '';
+  if(!isOllama){
+    const h=_PROVIDER_HINTS[p]||{label:'API Key',hint:''};
+    document.getElementById('apiKeyLabel').textContent=h.label;
+    document.getElementById('apiKeyHint').innerHTML=h.hint;
+    document.getElementById('apiKeyInput').value=S.apiKey;
+  }
+  // highlight active provider button
+  ['ollama','groq','gemini','openai'].forEach(id=>{
+    const b=document.getElementById('pBtn-'+id);
+    if(b) b.classList.toggle('active', id===p);
+  });
+}
+
+function toggleSettings(){
+  S.settOpen=!S.settOpen;
+  const p=document.getElementById('settingsPanel');
+  p.style.display=S.settOpen?'':'none';
+  if(S.settOpen){
+    setProvider(S.provider);
+    document.getElementById('ollamaUrlInput').value=S.ollamaUrl;
+    document.getElementById('modelInput').value=S.model;
+    // refresh GitHub status each time the settings panel opens
+    refreshGhStatus();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GitHub reference repo browser
+// ─────────────────────────────────────────────────────────────────────────────
+let _ghPath = '';  // current browsed directory path
+let _ghContent = ''; // current file content (for copy)
+
+async function refreshGhStatus(){
+  try{
+    const r = await fetch('/api/github/status');
+    const d = await r.json();
+    const badge = document.getElementById('ghStatusBadge');
+    const user  = document.getElementById('ghStatusUser');
+    const btn   = document.getElementById('ghBrowseBtn');
+    if(!badge) return;
+    if(d.configured){
+      badge.style.background='rgba(16,185,129,.15)';
+      badge.style.color='#6ee7b7';
+      badge.style.borderColor='rgba(16,185,129,.3)';
+      badge.textContent='✅ Connected';
+      user.textContent = d.username ? `as ${d.username}` : '';
+      btn.disabled=false;
+      btn.title='Browse '+d.refOwner+'/'+d.refRepo;
+    } else {
+      badge.style.background='rgba(239,68,68,.15)';
+      badge.style.color='#fca5a5';
+      badge.style.borderColor='rgba(239,68,68,.3)';
+      badge.textContent='⚠ Not configured';
+      user.textContent='';
+      btn.disabled=true;
+      btn.title='Configure GitHub credentials to browse';
+    }
+  } catch(_){}
+}
+
+async function ghConnect(){
+  const username = document.getElementById('ghUsernameInput').value.trim();
+  const token    = document.getElementById('ghTokenInput').value.trim();
+  const msg      = document.getElementById('ghConnectMsg');
+  const btn      = document.getElementById('ghConnectBtn');
+  if(!token){
+    msg.style.display='';
+    msg.style.color='#fca5a5';
+    msg.textContent='⚠ Please enter a personal access token.';
+    return;
+  }
+  btn.disabled=true;
+  btn.textContent='Connecting…';
+  msg.style.display='none';
+  try{
+    const res = await post('/api/github/credentials',{username, token});
+    if(res.ok){
+      msg.style.display='';
+      msg.style.color='#6ee7b7';
+      msg.textContent=`✅ Connected as ${res.username}`;
+      document.getElementById('ghTokenInput').value='';
+      await refreshGhStatus();
+    } else {
+      msg.style.display='';
+      msg.style.color='#fca5a5';
+      msg.textContent='⚠ '+(res.error||'Connection failed.');
+    }
+  } catch(e){
+    msg.style.display='';
+    msg.style.color='#fca5a5';
+    msg.textContent='⚠ '+(e.message||'Connection failed.');
+  } finally {
+    btn.disabled=false;
+    btn.textContent='🔗 Connect';
+  }
+}
+
+async function openGhBrowser(){
+  const modal = document.getElementById('ghBrowserModal');
+  modal.style.display='flex';
+  await ghNavigate('');
+}
+
+function closeGhBrowser(){
+  document.getElementById('ghBrowserModal').style.display='none';
+}
+
+async function ghNavigate(path){
+  _ghPath = path;
+  const crumb = document.getElementById('ghBreadcrumb');
+  crumb.textContent = path ? '/ '+path.replace(/\//g,' / ') : '/ (root)';
+
+  const list = document.getElementById('ghFileList');
+  list.innerHTML='<p style="padding:8px 12px;color:var(--dim)">Loading…</p>';
+  document.getElementById('ghPreviewCode').textContent='';
+  document.getElementById('ghPreviewName').textContent='';
+  document.getElementById('ghPreviewBar').style.display='none';
+
+  try{
+    const res = await post('/api/github/browse', {path});
+    if(res.error){ list.innerHTML=`<p style="padding:8px 12px;color:#fca5a5">${esc(res.error)}</p>`; return; }
+
+    if(res.type==='dir'){
+      list.innerHTML = res.entries.map(e=>`
+        <div onclick="ghClickEntry('${esc(e.path)}','${esc(e.type)}')"
+             style="display:flex;align-items:center;gap:6px;padding:5px 12px;cursor:pointer;border-radius:4px;margin:1px 4px"
+             onmouseover="this.style.background='rgba(255,255,255,.06)'"
+             onmouseout="this.style.background=''"
+             title="${esc(e.path)}">
+          <span>${e.type==='dir'?'📁':'📄'}</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.name)}</span>
+        </div>`).join('');
+
+      // add "up" link when not at root
+      if(path){
+        const parent = path.includes('/')?path.substring(0,path.lastIndexOf('/')):'';
+        list.innerHTML = `
+          <div onclick="ghNavigate('${esc(parent)}')"
+               style="display:flex;align-items:center;gap:6px;padding:5px 12px;cursor:pointer;border-radius:4px;margin:1px 4px;color:var(--dim)"
+               onmouseover="this.style.background='rgba(255,255,255,.06)'"
+               onmouseout="this.style.background=''">
+            ↩ ..
+          </div>` + list.innerHTML;
+      }
+    } else if(res.type==='file'){
+      _ghContent = res.content;
+      document.getElementById('ghPreviewBar').style.display='flex';
+      document.getElementById('ghPreviewName').textContent=res.path;
+      document.getElementById('ghPreviewCode').textContent=res.content;
+    }
+  } catch(e){
+    list.innerHTML=`<p style="padding:8px 12px;color:#fca5a5">Error: ${esc(e.message)}</p>`;
+  }
+}
+
+async function ghClickEntry(path, type){
+  if(type==='dir'){
+    await ghNavigate(path);
+  } else {
+    // show file in preview pane
+    const list = document.getElementById('ghFileList');
+    document.getElementById('ghPreviewCode').textContent='Loading…';
+    document.getElementById('ghPreviewBar').style.display='flex';
+    document.getElementById('ghPreviewName').textContent=path;
+    try{
+      const res = await post('/api/github/browse',{path});
+      if(res.error){
+        document.getElementById('ghPreviewCode').textContent='Error: '+res.error;
+      } else {
+        _ghContent = res.content||'';
+        document.getElementById('ghPreviewCode').textContent=_ghContent;
+      }
+    } catch(e){
+      document.getElementById('ghPreviewCode').textContent='Error: '+e.message;
+    }
+  }
+}
+
+async function ghCopyContent(){
+  await doCopy(_ghContent, null);
+}
+
+function ghUseAsRef(){
+  const path = document.getElementById('ghPreviewName').textContent;
+  S.ghRef = {path, content: _ghContent};
+  // Flash confirmation in the preview bar
+  const bar = document.getElementById('ghPreviewBar');
+  const old = bar.querySelector('.gh-ref-confirm');
+  if(old) old.remove();
+  const msg = document.createElement('span');
+  msg.className='gh-ref-confirm';
+  msg.style.cssText='font-size:11px;color:#6ee7b7;padding:0 4px';
+  msg.textContent='✅ Pinned!';
+  bar.appendChild(msg);
+  setTimeout(()=>msg.remove(), 2000);
+}
+
+function setLang(l){
+  S.lang=l; S.stage='idle'; S.files=null; S.chat=[]; S.unitTests=''; S.robotTests=''; S.testStage='idle';
+  render();
+}
+
+function doReset(){
+  S.wsdl=null; S.op=null; S.stage='idle'; S.files=null; S.chat=[];
+  S.unitTests=''; S.robotTests=''; S.testStage='idle';
+  document.getElementById('wsdlBox').value='';
+  render();
+}
+
+function loadFile(ev){
+  const f=ev.target.files[0]; if(!f)return;
+  const r=new FileReader();
+  r.onload=e=>{ document.getElementById('wsdlBox').value=e.target.result; };
+  r.readAsText(f);
+}
+
+async function doParse(){
+  const wsdl=document.getElementById('wsdlBox').value.trim();
+  const err=document.getElementById('parseErr');
+  err.style.display='none';
+  if(!wsdl){ err.textContent='Please paste or upload a WSDL file first.'; err.style.display=''; return; }
+  try{
+    const res=await post('/api/parse-wsdl',{wsdl});
+    if(res.error){ err.textContent=res.error; err.style.display=''; return; }
+    S.wsdl=res; S.op=null; S.stage='idle'; S.files=null; S.chat=[];
+    render();
+  } catch(e){ err.textContent='Could not reach server: '+e.message; err.style.display=''; }
+}
+
+function pickOp(name){
+  S.op=S.wsdl.operations.find(o=>o.name===name)||null;
+  S.stage='idle'; S.files=null; S.chat=[]; S.unitTests=''; S.robotTests=''; S.testStage='idle'; S.codeTab='controller';
+  render();
+}
+
+async function doGenerate(){
+  if(!S.op)return;
+  S.stage='generating'; S.files=null; S.chat=[];
+  renderMain();
+  try{
+    const res=await post('/api/generate',{operation:S.op,language:S.lang,refContent:S.ghRef.content});
+    if(res.error){ alert('Generation error: '+res.error); S.stage='idle'; renderMain(); return; }
+    S.files=res.files; S.stage='generated'; S.codeTab='controller';
+    renderMain();
+  } catch(e){ alert('Server error: '+e.message); S.stage='idle'; renderMain(); }
+}
+
+function setCodeTab(t){
+  S.codeTab=t;
+  // Update tabs without full re-render — match by onclick attribute (contains tab key)
+  document.querySelectorAll('#codeTabs .tab').forEach(b=>{
+    const match=b.getAttribute('onclick')||'';
+    b.classList.toggle('active', match.includes(`'${t}'`));
+  });
+  const d=document.getElementById('codeDisp');
+  if(d) d.textContent=activeCode();
+}
+
+function setTestTab(t){
+  S.testTab=t;
+  renderMain();
+}
+
+async function doChat(){
+  const inp=document.getElementById('chatIn');
+  const msg=(inp?inp.value:'').trim();
+  if(!msg||!_aiEnabled()||S.chatBusy)return;
+  S.chat.push({role:'user',content:msg});
+  S.chatBusy=true;
+  if(inp) inp.value='';
+  renderMain();
+  try{
+    const res=await post('/api/ai-refine',{
+      provider:S.provider, apiKey:S.apiKey, model:S.model, ollamaUrl:S.ollamaUrl,
+      operationName:S.op.name,
+      history:S.chat.slice(0,-1), files:S.files,
+      language:S.lang, userMessage:msg,
+      refContent:S.ghRef.content,
+    });
+    if(res.error){ S.chat.push({role:'assistant',content:'⚠ Error: '+res.error}); }
+    else{
+      S.chat.push({role:'assistant',content:res.message});
+      if(res.updatedFiles){
+        const km={controller:'controller',service:'serviceInterface',serviceImpl:'serviceImpl',transformer:'transformer',requestDto:'requestDto',responseDto:'responseDto'};
+        for(const[k,v] of Object.entries(res.updatedFiles)){
+          const mapped=km[k]||k;
+          if(S.files[mapped]!==undefined) S.files[mapped]=v;
+        }
+      }
+    }
+  } catch(e){ S.chat.push({role:'assistant',content:'⚠ Network error: '+e.message}); }
+  S.chatBusy=false;
+  renderMain();
+  setTimeout(()=>{ const l=document.getElementById('chatLog'); if(l) l.scrollTop=l.scrollHeight; },50);
+}
+
+function doSatisfied(){ S.stage='satisfied'; renderMain(); }
+
+async function doGenTests(){
+  if(!S.op)return;
+  S.testStage='generating'; renderMain();
+  try{
+    const res=await post('/api/generate-tests',{operation:S.op,language:S.lang});
+    if(res.error){ alert('Test error: '+res.error); S.testStage='idle'; renderMain(); return; }
+    S.unitTests=res.unitTests; S.robotTests=res.robotTests; S.testStage='generated';
+    renderMain();
+  } catch(e){ alert('Server error: '+e.message); S.testStage='idle'; renderMain(); }
+}
+
+async function doAiTests(){
+  if(!_aiEnabled()||S.aiBusy)return;
+  S.aiBusy=true; renderMain();
+  try{
+    const res=await post('/api/ai-tests',{
+      provider:S.provider, apiKey:S.apiKey, model:S.model, ollamaUrl:S.ollamaUrl,
+      operationName:S.op.name,
+      files:S.files, language:S.lang,
+    });
+    if(res.error){ alert('AI test error: '+res.error); }
+    else{
+      if(res.unitTests) S.unitTests=res.unitTests;
+      if(res.robotTests) S.robotTests=res.robotTests;
+      S.testStage='generated';
+    }
+  } catch(e){ alert('Server error: '+e.message); }
+  S.aiBusy=false; renderMain();
+}
+
+async function doCopy(text,btn){
+  try{
+    await navigator.clipboard.writeText(text);
+    if(btn){ const o=btn.innerHTML; btn.innerHTML='✓ Copied!'; setTimeout(()=>btn.innerHTML=o,1500); }
+  } catch(e){ alert('Copy failed — please select the text manually.'); }
+}
+
+function doDownload(filename,text){
+  const a=document.createElement('a');
+  a.href='data:text/plain;charset=utf-8,'+encodeURIComponent(text);
+  a.download=filename; a.click();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boot
+// ─────────────────────────────────────────────────────────────────────────────
+render();
+</script>
+</body>
+</html>
