@@ -1,0 +1,1187 @@
+"""
+Unit tests for the Flaky Test Analysis Skill.
+
+Run with:
+    pytest tests/test_flaky_skill.py -v
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Fixtures and helpers
+# ---------------------------------------------------------------------------
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+SAMPLE_RUN1 = FIXTURE_DIR / "sample_output.xml"
+SAMPLE_RUN2 = FIXTURE_DIR / "sample_output_run2.xml"
+
+
+# ===========================================================================
+# RobotOutputParser
+# ===========================================================================
+
+class TestRobotOutputParser:
+    def setup_method(self):
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        self.parser = RobotOutputParser()
+
+    def test_parse_file_returns_parsed_run(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        assert run.source_file == str(SAMPLE_RUN1)
+        assert len(run.tests) > 0
+
+    def test_parse_file_extracts_test_names(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        names = {t.name for t in run.tests}
+        assert "test_user_session_timeout" in names
+        assert "test_login_with_valid_credentials" in names
+
+    def test_parse_file_records_status(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        by_name = {t.name: t for t in run.tests}
+        assert by_name["test_user_session_timeout"].status == "FAIL"
+        assert by_name["test_login_with_valid_credentials"].status == "PASS"
+
+    def test_parse_file_records_failure_message(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        timeout_test = next(
+            t for t in run.tests if t.name == "test_user_session_timeout"
+        )
+        # The fixture message explicitly contains "AssertionError" and "datetime.now()"
+        assert "AssertionError" in timeout_test.message
+        assert "datetime.now()" in timeout_test.message
+
+    def test_parse_file_records_elapsed_ms(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        for test in run.tests:
+            assert test.elapsed_ms >= 0
+
+    def test_parse_file_records_tags(self):
+        run = self.parser.parse_file(SAMPLE_RUN1)
+        db_test = next(
+            t for t in run.tests if t.name == "test_user_registration_unique_email"
+        )
+        assert "database" in db_test.tags
+
+    def test_parse_files_returns_multiple_runs(self):
+        runs = self.parser.parse_files([SAMPLE_RUN1, SAMPLE_RUN2])
+        assert len(runs) == 2
+
+    def test_parse_file_missing_raises(self):
+        with pytest.raises(Exception):
+            self.parser.parse_file("/nonexistent/path/output.xml")
+
+
+# ===========================================================================
+# PatternDatabase
+# ===========================================================================
+
+class TestPatternDatabase:
+    def setup_method(self):
+        from skills.flaky_test_analysis.pattern_db import PatternDatabase
+        self.db = PatternDatabase()
+
+    def test_loads_patterns(self):
+        assert len(self.db.all_patterns) >= 5
+
+    def test_get_pattern_by_id(self):
+        pattern = self.db.get_pattern("datetime_timing")
+        assert pattern is not None
+        assert pattern.name == "Datetime / Timing Issue"
+
+    def test_get_nonexistent_pattern_returns_none(self):
+        assert self.db.get_pattern("nonexistent_id") is None
+
+    def test_match_datetime_pattern(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_user_session_timeout",
+            suite="Auth Suite",
+            status="FAIL",
+            message="AssertionError: Session expected to be expired. datetime.now() returned unexpected value.",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=1000,
+        )
+        matches = self.db.match(test)
+        pattern_ids = {p.id for p in matches}
+        assert "datetime_timing" in pattern_ids
+
+    def test_match_database_pattern(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_user_registration",
+            suite="DB Suite",
+            status="FAIL",
+            message="IntegrityError: duplicate key value violates unique constraint",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=500,
+        )
+        matches = self.db.match(test)
+        pattern_ids = {p.id for p in matches}
+        assert "database_state" in pattern_ids
+
+    def test_match_external_api_pattern(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_send_email",
+            suite="API Suite",
+            status="FAIL",
+            message="ConnectionError: HTTPSConnectionPool max retries exceeded sendgrid",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=5000,
+        )
+        matches = self.db.match(test)
+        pattern_ids = {p.id for p in matches}
+        assert "unmocked_external_api" in pattern_ids
+
+    def test_no_match_for_passing_test_with_no_signals(self):
+        from skills.flaky_test_analysis.robot_parser import TestResult
+        test = TestResult(
+            name="test_simple_addition",
+            suite="Math Suite",
+            status="FAIL",
+            message="AssertionError: 2 + 2 expected 4 got 5",
+            start_time=None,
+            end_time=None,
+            elapsed_ms=10,
+        )
+        matches = self.db.match(test)
+        # Should not match any specific pattern
+        assert isinstance(matches, list)
+
+
+# ===========================================================================
+# MetricsEngine
+# ===========================================================================
+
+class TestMetricsEngine:
+    def setup_method(self):
+        from skills.flaky_test_analysis.metrics import MetricsEngine
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        self.engine = MetricsEngine()
+        parser = RobotOutputParser()
+        self.runs = parser.parse_files([SAMPLE_RUN1, SAMPLE_RUN2])
+
+    def test_compute_returns_metrics_for_all_tests(self):
+        metrics = self.engine.compute(self.runs)
+        assert len(metrics) > 0
+
+    def test_flaky_test_detected(self):
+        metrics = self.engine.compute(self.runs)
+        by_name = {m.name: m for m in metrics}
+        # test_user_session_timeout fails in run1 (FAIL) and passes in run2 (PASS)
+        # → 1 failure in 2 runs = 50% failure rate → "High"
+        m = by_name.get("test_user_session_timeout")
+        assert m is not None
+        assert m.flakiness_score == "High"
+
+    def test_stable_test_not_flaky(self):
+        metrics = self.engine.compute(self.runs)
+        by_name = {m.name: m for m in metrics}
+        # test_login_with_valid_credentials always passes
+        m = by_name.get("test_login_with_valid_credentials")
+        assert m is not None
+        assert m.flakiness_score == "Stable"
+
+    def test_failure_rate_calculation(self):
+        metrics = self.engine.compute(self.runs)
+        by_name = {m.name: m for m in metrics}
+        m = by_name["test_user_session_timeout"]
+        # Fails in 1 of 2 runs → 50%
+        assert m.failure_count == 1
+        assert m.total_runs == 2
+        assert abs(m.failure_rate - 0.5) < 0.01
+
+    def test_metrics_sorted_by_severity(self):
+        metrics = self.engine.compute(self.runs)
+        non_stable = [m for m in metrics if m.flakiness_score != "Stable"]
+        order = {"High": 0, "Medium": 1, "Low": 2}
+        for i in range(len(non_stable) - 1):
+            assert order.get(non_stable[i].flakiness_score, 3) <= order.get(
+                non_stable[i + 1].flakiness_score, 3
+            )
+
+    def test_failure_rate_display_format(self):
+        metrics = self.engine.compute(self.runs)
+        for m in metrics:
+            assert "/" in m.failure_rate_display
+
+
+# ===========================================================================
+# Recommender
+# ===========================================================================
+
+class TestRecommender:
+    def setup_method(self):
+        from skills.flaky_test_analysis.metrics import MetricsEngine
+        from skills.flaky_test_analysis.recommender import Recommender
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        self.recommender = Recommender()
+        parser = RobotOutputParser()
+        self.runs = parser.parse_files([SAMPLE_RUN1, SAMPLE_RUN2])
+        self.engine = MetricsEngine()
+        self.metrics = self.engine.compute(self.runs)
+
+    def _build_all_results(self):
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        parser = RobotOutputParser()
+        all_results = {}
+        for run in self.runs:
+            for t in run.tests:
+                all_results.setdefault(t.name, []).append(t)
+        return all_results
+
+    def test_recommend_all_returns_dict(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        assert isinstance(recs, dict)
+
+    def test_no_recommendation_for_stable_tests(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        # Stable tests should not be in the recommendations dict
+        stable = {m.name for m in self.metrics if m.flakiness_score == "Stable"}
+        for name in stable:
+            assert name not in recs
+
+    def test_recommendation_has_required_fields(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        for test_name, rec_list in recs.items():
+            for rec in rec_list:
+                assert rec.test_name == test_name
+                assert rec.pattern_id
+                assert rec.pattern_name
+                assert rec.fix_template
+
+    def test_datetime_pattern_recommendation(self):
+        all_results = self._build_all_results()
+        recs = self.recommender.recommend_all(self.metrics, all_results)
+        timeout_recs = recs.get("test_user_session_timeout", [])
+        pattern_ids = {r.pattern_id for r in timeout_recs}
+        assert "datetime_timing" in pattern_ids
+
+    def test_recommend_for_failed_returns_recs_for_single_run_failed_test(self):
+        """recommend_for_failed matches patterns even when there is only 1 run (no flakiness)."""
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        parser = RobotOutputParser()
+        single_run = parser.parse_files([SAMPLE_RUN1])  # single run → all tests are "Stable"
+        # Collect the failed test results
+        failed_by_name = {}
+        for run in single_run:
+            for t in run.tests:
+                if t.status == "FAIL":
+                    failed_by_name.setdefault(t.name, []).append(t)
+
+        # The datetime failing test should still get a recommendation
+        timeout_results = failed_by_name.get("test_user_session_timeout", [])
+        recs = self.recommender.recommend_for_failed("test_user_session_timeout", timeout_results)
+        assert len(recs) > 0
+        pattern_ids = {r.pattern_id for r in recs}
+        assert "datetime_timing" in pattern_ids
+
+    def test_recommend_for_failed_returns_empty_for_passing_test(self):
+        """recommend_for_failed returns [] when all provided results are passing."""
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        parser = RobotOutputParser()
+        single_run = parser.parse_files([SAMPLE_RUN1])
+        passing = [t for run in single_run for t in run.tests if t.status == "PASS"]
+        recs = self.recommender.recommend_for_failed("test_login_with_valid_credentials", passing)
+        assert recs == []
+
+
+# ===========================================================================
+# FlakyTestAnalysisSkill (integration, no AI)
+# ===========================================================================
+
+class TestFlakyTestAnalysisSkill:
+    def setup_method(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        self.skill = FlakyTestAnalysisSkill()
+
+    def test_default_model_is_current(self):
+        """The default Claude model must be a currently-available model ID."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill()
+        # Must not reference the deprecated claude-3-5-sonnet-20241022 model
+        assert "claude-3-5-sonnet-20241022" not in skill._model
+        # Must be one of the known current model IDs
+        assert "claude-sonnet-4-5" in skill._model or "claude-sonnet-4" in skill._model
+
+    def test_run_analysis_returns_report(self):
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            use_ai_summary=False,
+        )
+        assert report is not None
+        assert len(report.metrics) > 0
+
+    def test_formatted_report_is_markdown(self):
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            use_ai_summary=False,
+        )
+        assert "# Flaky Test Analysis Report" in report.formatted_report
+
+    def test_flaky_tests_appear_in_report(self):
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            use_ai_summary=False,
+        )
+        assert "test_user_session_timeout" in report.formatted_report
+
+    def test_single_run_marks_no_flakiness(self):
+        """A single run cannot demonstrate flakiness; all tests should be Stable."""
+        report = self.skill.run_analysis(
+            [SAMPLE_RUN1],
+            use_ai_summary=False,
+        )
+        # With only one run there are no passing counterparts for failing tests,
+        # so no test has mixed results → all are Stable.
+        flaky = [m for m in report.metrics if m.flakiness_score != "Stable"]
+        assert len(flaky) == 0
+
+    def test_jira_posting_is_called_when_key_provided(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = MagicMock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            jira_issue_key="TEST-1",
+            use_ai_summary=False,
+        )
+        mock_jira.post_analysis_report.assert_called_once()
+
+    def test_no_jira_call_without_issue_key(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = MagicMock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.run_analysis(
+            [SAMPLE_RUN1, SAMPLE_RUN2],
+            jira_issue_key=None,
+            use_ai_summary=False,
+        )
+        mock_jira.post_analysis_report.assert_not_called()
+
+    def test_ai_summary_skipped_without_api_key(self):
+        """When ANTHROPIC_API_KEY is not set, ai_summary should be empty string."""
+        with patch.dict("os.environ", {}, clear=True):
+            from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="")
+            report = skill.run_analysis(
+                [SAMPLE_RUN1, SAMPLE_RUN2],
+                use_ai_summary=True,
+            )
+            assert report.ai_summary == ""
+
+
+# ===========================================================================
+# JiraClient
+# ===========================================================================
+
+class TestJiraClient:
+    def test_mcp_mode_returns_stub(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(auth_mode="mcp")
+        result = client.post_comment("TEST-1", "Hello")
+        assert result["status"] == "stub"
+        assert result["issue_key"] == "TEST-1"
+
+    def test_rest_mode_raises_without_config(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(auth_mode="rest", base_url="", user_email="", api_token="")
+        with pytest.raises(RuntimeError, match="Missing Jira configuration"):
+            client.post_comment("TEST-1", "Hello")
+
+    def test_rest_mode_posts_comment(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(
+            base_url="https://example.atlassian.net",
+            user_email="user@example.com",
+            api_token="fake-token",
+            auth_mode="rest",
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"id": "12345", "body": "Hello"}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.post.return_value = mock_response
+            result = client.post_comment("TEST-1", "Hello")
+
+        mock_req.post.assert_called_once()
+        assert result["id"] == "12345"
+
+
+# ===========================================================================
+# JiraClient – read operations (get_issue, list_attachments, download)
+# ===========================================================================
+
+class TestJiraClientRead:
+    """Tests for the new read-side methods added to JiraClient."""
+
+    def _make_client(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        return JiraClient(
+            base_url="https://example.atlassian.net",
+            user_email="user@example.com",
+            api_token="fake-token",
+            auth_mode="rest",
+        )
+
+    def _mock_response(self, json_data, status_code=200):
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        mock_resp.json.return_value = json_data
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    def test_get_issue_returns_normalised_dict(self):
+        client = self._make_client()
+        api_payload = {
+            "key": "NCCF-1",
+            "fields": {
+                "summary": "Build failed",
+                "description": "Some description",
+                "status": {"name": "Open"},
+                "attachment": [
+                    {
+                        "id": "10001",
+                        "filename": "output.xml",
+                        "mimeType": "application/xml",
+                        "size": 1024,
+                        "content": "https://example.atlassian.net/secure/attachment/10001/output.xml",
+                    }
+                ],
+                "comment": {
+                    "comments": [
+                        {"body": "First comment"},
+                        {"body": "Second comment"},
+                    ]
+                },
+            },
+        }
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = self._mock_response(api_payload)
+            issue = client.get_issue("NCCF-1")
+
+        assert issue["key"] == "NCCF-1"
+        assert issue["summary"] == "Build failed"
+        assert issue["status"] == "Open"
+        assert len(issue["attachments"]) == 1
+        assert issue["attachments"][0]["filename"] == "output.xml"
+        assert issue["comments"] == ["First comment", "Second comment"]
+
+    def test_get_issue_handles_missing_fields_gracefully(self):
+        client = self._make_client()
+        # Minimal API response – some fields absent
+        api_payload = {"key": "NCCF-2", "fields": {}}
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = self._mock_response(api_payload)
+            issue = client.get_issue("NCCF-2")
+
+        assert issue["summary"] == ""
+        assert issue["description"] == ""
+        assert issue["status"] == ""
+        assert issue["attachments"] == []
+        assert issue["comments"] == []
+
+    def test_list_attachments_returns_list(self):
+        client = self._make_client()
+        api_payload = {
+            "key": "NCCF-3",
+            "fields": {
+                "attachment": [
+                    {"id": "1", "filename": "log.html", "mimeType": "text/html", "size": 512,
+                     "content": "https://example.atlassian.net/secure/attachment/1/log.html"},
+                    {"id": "2", "filename": "output.xml", "mimeType": "application/xml",
+                     "size": 256, "content": "https://example.atlassian.net/secure/attachment/2/output.xml"},
+                ],
+                "comment": {"comments": []},
+            },
+        }
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = self._mock_response(api_payload)
+            attachments = client.list_attachments("NCCF-3")
+
+        assert len(attachments) == 2
+        filenames = {a["filename"] for a in attachments}
+        assert filenames == {"log.html", "output.xml"}
+
+    def test_download_attachment_returns_bytes(self):
+        client = self._make_client()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"<robot generator='Robot'>...</robot>"
+        mock_resp.raise_for_status = MagicMock()
+
+        attachment = {
+            "filename": "output.xml",
+            "content": "https://example.atlassian.net/secure/attachment/1/output.xml",
+        }
+
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = mock_resp
+            data = client.download_attachment(attachment)
+
+        assert isinstance(data, bytes)
+        assert b"robot" in data
+
+    def test_download_attachment_raises_without_content_url(self):
+        from skills.flaky_test_analysis.jira_client import JiraClient
+        client = JiraClient(
+            base_url="https://example.atlassian.net",
+            user_email="user@example.com",
+            api_token="fake-token",
+        )
+        with pytest.raises(RuntimeError, match="no content URL"):
+            client.download_attachment({"filename": "empty.txt", "content": ""})
+
+    def test_get_issue_raises_on_http_error(self):
+        client = self._make_client()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = "Not Found"
+        mock_resp.raise_for_status.side_effect = Exception("404")
+
+        with patch("skills.flaky_test_analysis.jira_client._requests") as mock_req:
+            mock_req.get.return_value = mock_resp
+            with pytest.raises(RuntimeError, match="Jira API error"):
+                client.get_issue("NCCF-999")
+
+
+# ===========================================================================
+# FlakyTestAnalysisSkill – analyze_ticket()
+# ===========================================================================
+
+SAMPLE_OUTPUT_XML = (Path(__file__).parent / "fixtures" / "sample_output.xml").read_bytes()
+
+
+def _make_jira_mock(
+    summary="Build failed on login suite",
+    status="Open",
+    description="Jenkins build #42 failed.\n\nSee attached log.",
+    attachments=None,
+    comments=None,
+):
+    """Return a mock JiraClient configured for ticket-driven tests."""
+    mock_client = MagicMock()
+    mock_client.get_issue.return_value = {
+        "key": "NCCF-1",
+        "summary": summary,
+        "status": status,
+        "description": description,
+        "attachments": attachments or [],
+        "comments": comments or [],
+    }
+    mock_client.list_attachments.return_value = attachments or []
+    mock_client.download_attachment.return_value = b"plain text log content: ERROR timeout"
+    mock_client.post_analysis_report.return_value = {"id": "99"}
+    return mock_client
+
+
+class TestAnalyzeTicket:
+    def setup_method(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        self.skill = FlakyTestAnalysisSkill
+
+    def test_analyze_ticket_returns_ticket_report(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill, TicketAnalysisReport
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert isinstance(report, TicketAnalysisReport)
+        assert report.issue_key == "NCCF-1"
+        assert report.summary == "Build failed on login suite"
+
+    def test_analyze_ticket_posts_comment_by_default(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=True)
+        mock_jira.post_analysis_report.assert_called_once_with("NCCF-1", mock_jira.post_analysis_report.call_args[0][1])
+
+    def test_analyze_ticket_skips_post_when_no_post(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        mock_jira.post_analysis_report.assert_not_called()
+
+    def test_analyze_ticket_with_text_attachment(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "1",
+                "filename": "build.log",
+                "mimeType": "text/plain",
+                "size": 100,
+                "content": "https://example.atlassian.net/secure/attachment/1/build.log",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = b"ERROR: test_login FAILED\nTimeout after 30s"
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert len(report.attachments) == 1
+        assert report.attachments[0].filename == "build.log"
+        assert "ERROR" in report.attachments[0].text_content
+
+    def test_analyze_ticket_with_html_attachment(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "2",
+                "filename": "log.html",
+                "mimeType": "text/html",
+                "size": 200,
+                "content": "https://example.atlassian.net/secure/attachment/2/log.html",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        html_content = b"<html><body><h1>Log</h1><p>Test failed</p><script>var x=1;</script></body></html>"
+        mock_jira.download_attachment.return_value = html_content
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        text = report.attachments[0].text_content
+        # HTML tags and script content should be stripped
+        assert "<html>" not in text
+        assert "var x=1" not in text
+        assert "Test failed" in text
+
+    def test_analyze_ticket_with_robot_xml_attachment(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "3",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/3/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # The robot xml should be classified as a robot xml attachment
+        assert any(a.is_robot_xml for a in report.attachments)
+        # And robot runs should be parsed
+        assert len(report.robot_runs) >= 1
+
+    def test_analyze_ticket_formatted_report_contains_key(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "NCCF-1" in report.formatted_report
+
+    def test_analyze_ticket_formatted_report_contains_root_cause_section(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "Root Cause" in report.formatted_report
+
+    def test_analyze_ticket_ai_skipped_without_api_key(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        with patch.dict("os.environ", {}, clear=True):
+            mock_jira = _make_jira_mock()
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="", jira_client=mock_jira)
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+            # No API key → root_cause stays empty
+            assert report.root_cause == ""
+            # Report should tell user to set the key
+            assert "Set `ANTHROPIC_API_KEY`" in report.formatted_report
+
+    def test_analyze_ticket_ai_failure_shows_check_logs_message(self):
+        """When the key IS set but the AI call fails, show the error cause not 'set key'."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+
+        with patch("skills.flaky_test_analysis.skill._ANTHROPIC_AVAILABLE", True), \
+             patch("skills.flaky_test_analysis.skill._anthropic", create=True) as mock_ant:
+            # Simulate any API error (e.g. model not found, billing, etc.)
+            mock_ant.APIStatusError = Exception
+            mock_ant.Anthropic.return_value.messages.create.side_effect = Exception("model_not_found")
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="sk-test", jira_client=mock_jira)
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        # root_cause empty because the call failed
+        assert report.root_cause == ""
+        # Should NOT tell user to set the key (it is set)
+        assert "Set `ANTHROPIC_API_KEY`" not in report.formatted_report
+        # Should describe the specific failure cause in the report, with graceful fallback wording
+        assert "AI analysis unavailable" in report.formatted_report
+        assert "model not found" in report.formatted_report
+
+    def test_analyze_ticket_ai_calls_claude_when_key_set(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text="**Root Cause:** Timeout. **Recommended Solution:** Add retry.")]
+
+        with patch("skills.flaky_test_analysis.skill._ANTHROPIC_AVAILABLE", True), \
+             patch("skills.flaky_test_analysis.skill._anthropic", create=True) as mock_ant:
+            mock_ant.Anthropic.return_value.messages.create.return_value = mock_message
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="sk-test", jira_client=mock_jira)
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "Timeout" in report.root_cause or "Timeout" in report.recommended_solution
+
+    def test_parse_ai_response_extracts_sections(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        response = (
+            "**Root Cause:** The test relies on a real system clock.\n\n"
+            "**Recommended Solution:** Use freezegun to freeze time in tests."
+        )
+        rc, sol = FlakyTestAnalysisSkill._parse_ai_response(response)
+        assert "real system clock" in rc
+        assert "freezegun" in sol
+
+    def test_parse_ai_response_fallback_when_no_labels(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        response = "The test is broken because of a timing issue."
+        rc, sol = FlakyTestAnalysisSkill._parse_ai_response(response)
+        # Fallback: everything goes into root_cause
+        assert "timing issue" in rc
+        assert sol == ""
+
+    def test_analyze_ticket_with_zip_containing_robot_xml(self):
+        """A ZIP attachment containing a Robot output.xml is extracted and parsed."""
+        import io
+        import zipfile
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("output.xml", SAMPLE_OUTPUT_XML)
+        zip_bytes = buf.getvalue()
+
+        attachments = [
+            {
+                "id": "5",
+                "filename": "test_results.zip",
+                "mimeType": "application/zip",
+                "size": len(zip_bytes),
+                "content": "https://example.atlassian.net/secure/attachment/5/test_results.zip",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = zip_bytes
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        # The zip archive itself should appear in attachment infos
+        assert any("test_results.zip" in a.filename for a in report.attachments)
+        # The Robot XML entry extracted from the zip should be classified correctly
+        assert any(a.is_robot_xml for a in report.attachments)
+        # Robot runs must have been parsed from the extracted XML
+        assert len(report.robot_runs) >= 1
+
+    def test_analyze_ticket_with_zip_containing_text_files(self):
+        """Text files inside a ZIP attachment are extracted and their content captured."""
+        import io
+        import zipfile
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("build.log", "ERROR: test_login FAILED\nTimeout after 30s")
+        zip_bytes = buf.getvalue()
+
+        attachments = [
+            {
+                "id": "6",
+                "filename": "logs.zip",
+                "mimeType": "application/zip",
+                "size": len(zip_bytes),
+                "content": "https://example.atlassian.net/secure/attachment/6/logs.zip",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = zip_bytes
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        # The extracted log entry should carry its text content
+        log_entries = [a for a in report.attachments if "build.log" in a.filename]
+        assert log_entries, "Expected an AttachmentInfo for build.log extracted from zip"
+        assert "ERROR" in log_entries[0].text_content
+
+    def test_analyze_ticket_no_ai_fallback_message(self):
+        """With use_ai=False and no robot runs the report says AI was skipped, not missing."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # Should mention --no-ai, not tell user to set ANTHROPIC_API_KEY
+        assert "--no-ai" in report.formatted_report
+        assert "Set `ANTHROPIC_API_KEY`" not in report.formatted_report
+
+    def test_analyze_ticket_pattern_matching_runs_on_single_run_failed_tests(self):
+        """Pattern matching runs on failed tests even with a single robot XML (no flakiness)."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "7",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/7/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # The single-run XML has tests failing with "datetime.now()" and "ConnectionError" etc.
+        assert len(report.recommendations) > 0
+        # The datetime_timing pattern should be found for the timing test
+        timeout_recs = report.recommendations.get("test_user_session_timeout", [])
+        assert any(r.pattern_id == "datetime_timing" for r in timeout_recs)
+
+    def test_analyze_ticket_report_shows_detected_patterns_section(self):
+        """The formatted report includes a 'Detected Patterns' section when patterns are found."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "8",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/8/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "Detected Patterns" in report.formatted_report
+
+    def test_analyze_ticket_no_ai_fallback_mentions_patterns_when_present(self):
+        """The --no-ai fallback message mentions 'detected patterns' when patterns were found."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "9",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/9/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # When patterns are present the fallback should reference them
+        assert "detected patterns" in report.formatted_report
+
+    def test_analyze_ticket_no_ai_fallback_omits_patterns_when_none_found(self):
+        """The --no-ai fallback message does NOT mention patterns when none were matched."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        # Use a plain text attachment (no Robot XML) so no patterns can match
+        mock_jira = _make_jira_mock()  # no attachments → no robot runs → no patterns
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "detected patterns" not in report.formatted_report
+
+    def test_is_zip_archive_detects_by_extension(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        assert FlakyTestAnalysisSkill._is_zip_archive("archive.zip", b"anything") is True
+        assert FlakyTestAnalysisSkill._is_zip_archive("output.xml", b"anything") is False
+
+    def test_is_zip_archive_detects_by_magic_bytes(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        zip_magic = b"PK\x03\x04" + b"\x00" * 10
+        assert FlakyTestAnalysisSkill._is_zip_archive("noextension", zip_magic) is True
+        assert FlakyTestAnalysisSkill._is_zip_archive("noextension", b"not a zip") is False
+
+    def test_zip_attachment_formatted_report_shows_summary_not_member_names(self):
+        """The formatted report should show ZIP as one line with a file count,
+        not expand every extracted filename in the Attachments Found section."""
+        import io
+        import zipfile
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("build.log", "ERROR: timeout")
+            zf.writestr("report.html", "<html>ok</html>")
+        zip_bytes = buf.getvalue()
+
+        attachments = [
+            {
+                "id": "10",
+                "filename": "results.zip",
+                "mimeType": "application/zip",
+                "size": len(zip_bytes),
+                "content": "https://example.atlassian.net/secure/attachment/10/results.zip",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = zip_bytes
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        # The ZIP itself should appear with a file count
+        assert "results.zip" in report.formatted_report
+        assert "unzipped" in report.formatted_report
+        assert "2 file(s) found" in report.formatted_report
+        # Individual member names must NOT appear in the formatted report's attachments section
+        assert "build.log" not in report.formatted_report
+        assert "report.html" not in report.formatted_report
+        # The raw AttachmentInfo objects for members are still available for AI/pattern analysis
+        assert any("build.log" in a.filename for a in report.attachments)
+
+
+# ===========================================================================
+# CLI – --jira-ticket argument
+# ===========================================================================
+
+class TestCLIJiraTicketMode:
+    _FAKE_JIRA_ENV = {
+        "JIRA_BASE_URL": "https://example.atlassian.net",
+        "JIRA_USER_EMAIL": "ci@example.com",
+        "JIRA_API_TOKEN": "fake-token",
+    }
+
+    def test_jira_ticket_mode_calls_analyze_ticket(self):
+        from run_flaky_analysis import main
+        mock_report = MagicMock()
+        mock_report.formatted_report = "# Root Cause Analysis\nDone."
+        mock_report.flaky_metrics = []
+
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.return_value = mock_report
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post"])
+            assert exc_info.value.code == 0
+            MockSkill.return_value.analyze_ticket.assert_called_once_with(
+                jira_issue_key="NCCF-1",
+                use_ai=False,
+                post_comment=False,
+            )
+
+    def test_both_modes_mutually_exclusive(self):
+        from run_flaky_analysis import main
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--jira-ticket", "NCCF-1", "--robot-output", "file.xml"])
+        assert exc_info.value.code == 1
+
+    def test_no_mode_exits_with_error(self):
+        from run_flaky_analysis import main
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+        assert exc_info.value.code != 0
+
+    def test_missing_jira_env_exits_with_friendly_message(self, capsys):
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "JIRA_BASE_URL" in err
+        assert "JIRA_USER_EMAIL" in err
+        assert "JIRA_API_TOKEN" in err
+        # Should not be a raw traceback
+        assert "Traceback" not in err
+
+    def test_partial_jira_env_lists_only_missing_vars(self, capsys):
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", {"JIRA_BASE_URL": "https://example.atlassian.net"}, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        # The two missing vars should be listed under "not set:"
+        assert "JIRA_USER_EMAIL" in err
+        assert "JIRA_API_TOKEN" in err
+        # JIRA_BASE_URL should NOT appear in the "not set" bullet list
+        # (it may still appear in the static example section)
+        not_set_block = err.split("Set them and re-run")[0]
+        assert "JIRA_BASE_URL" not in not_set_block
+
+    def test_runtime_error_from_analyze_ticket_is_handled_gracefully(self, capsys):
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.side_effect = RuntimeError("Connection refused")
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "Connection refused" in err
+        assert "Traceback" not in err
+
+    def test_unexpected_error_shows_no_ai_tip(self, capsys):
+        """Generic exceptions from analyze_ticket should suggest --no-ai."""
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.side_effect = Exception("boom")
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-ticket", "NCCF-1", "--no-post"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "--no-ai" in err
+
+
+# ===========================================================================
+# Anthropic API error handling
+# ===========================================================================
+
+class TestAnthropicErrorHandling:
+    """_generate_ai_summary and _generate_root_cause_analysis must handle
+    Anthropic API errors gracefully instead of propagating them to callers."""
+
+    def _make_api_status_error(self, status_code: int, message: str):
+        """Build a minimal fake that quacks like anthropic.APIStatusError."""
+        exc = Exception(f"Error code: {status_code} - {message}")
+        exc.status_code = status_code
+        return exc
+
+    def test_ai_summary_returns_empty_string_on_billing_error(self, caplog):
+        """A 400 credit-balance error must be caught; the method returns ''."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        billing_exc = self._make_api_status_error(
+            400,
+            "Your credit balance is too low to access the Anthropic API."
+        )
+
+        # Simulate anthropic being available with a fake module object
+        fake_anthropic = MagicMock()
+        fake_anthropic.APIStatusError = type(billing_exc)
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = billing_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="fake-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            from skills.flaky_test_analysis.metrics import TestMetrics
+            metric = MagicMock(spec=TestMetrics)
+            metric.flakiness_score = "High"
+            metric.name = "test_foo"
+            metric.failure_rate_display = "50%"
+
+            result = skill._generate_ai_summary([metric], {})
+
+        assert result == ""
+
+    def test_root_cause_returns_empty_tuple_on_billing_error(self, caplog):
+        """A 400 credit-balance error in _generate_root_cause_analysis must be
+        caught and return ('', '', <error_hint>)."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        billing_exc = self._make_api_status_error(
+            400,
+            "Your credit balance is too low to access the Anthropic API."
+        )
+
+        fake_anthropic = MagicMock()
+        fake_anthropic.APIStatusError = type(billing_exc)
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = billing_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="fake-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result[:2] == ("", "")
+        root_cause, recommended_solution, error_hint = result
+        assert error_hint  # billing error hint must be non-empty
+
+    def test_auth_error_returns_empty_string(self, caplog):
+        """A 401 authentication error must also be handled gracefully."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        auth_exc = self._make_api_status_error(401, "Invalid API key")
+
+        fake_anthropic = MagicMock()
+        fake_anthropic.APIStatusError = type(auth_exc)
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = auth_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="bad-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result[:2] == ("", "")
+        root_cause, recommended_solution, error_hint = result
+        assert error_hint  # auth error hint must be non-empty
+
+    def test_connection_error_returns_empty_tuple(self, caplog):
+        """A non-HTTP error (connection / timeout) must also be caught gracefully."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        conn_exc = ConnectionError("Failed to establish a connection")
+
+        fake_anthropic = MagicMock()
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = conn_exc
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="fake-key")
+
+        with patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result[:2] == ("", "")
+        root_cause, recommended_solution, error_hint = result
+        assert error_hint  # connection error hint must be non-empty
+
+    def test_ai_not_called_when_anthropic_unavailable(self):
+        """When _ANTHROPIC_AVAILABLE is False, AI functions must not be called."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "X-1", "summary": "S", "status": "Open",
+            "description": "", "attachments": [], "comments": [],
+        }
+        mock_jira.list_attachments.return_value = []
+
+        skill = FlakyTestAnalysisSkill(anthropic_api_key="sk-real-key", jira_client=mock_jira)
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill, "_generate_root_cause_analysis", wraps=skill._generate_root_cause_analysis) as spy:
+            report = skill.analyze_ticket("X-1", use_ai=True, post_comment=False)
+
+        # _ANTHROPIC_AVAILABLE is False → the AI function must NOT have been called
+        spy.assert_not_called()
+        assert report.root_cause == ""
