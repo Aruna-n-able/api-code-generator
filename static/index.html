@@ -210,8 +210,50 @@ code{font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:12
 
 <!-- ── SETTINGS PANEL ─────────────────────────────────────────────────────────── -->
 <div id="settingsPanel" style="display:none">
-  <p>Optional — add your OpenAI API key to enable AI-powered code refinement and test generation. The key is held in memory for this session only.</p>
-  <input type="password" id="apiKeyInput" placeholder="sk-…" style="max-width:400px" oninput="S.apiKey=this.value">
+  <p>Configure the AI provider used for code refinement and test generation. Free options are available — no credit card required.</p>
+
+  <div style="display:flex;flex-direction:column;gap:12px;max-width:520px">
+
+    <!-- Provider selector -->
+    <label style="font-size:12px;color:var(--muted)">AI Provider</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap" id="providerBtns">
+      <button class="btn" id="pBtn-ollama"  onclick="setProvider('ollama')" title="Local, completely free">🖥 Ollama (Local · Free)</button>
+      <button class="btn" id="pBtn-groq"    onclick="setProvider('groq')"   title="Free cloud API key from console.groq.com">⚡ Groq (Free)</button>
+      <button class="btn" id="pBtn-gemini"  onclick="setProvider('gemini')" title="Free cloud API key from aistudio.google.com">✦ Gemini (Free)</button>
+      <button class="btn" id="pBtn-openai"  onclick="setProvider('openai')" title="Paid — requires OpenAI credits">🔑 OpenAI (Paid)</button>
+    </div>
+
+    <!-- Ollama URL (shown only for Ollama) -->
+    <div id="ollamaUrlRow">
+      <label style="font-size:12px;color:var(--muted)">Ollama server URL</label>
+      <input type="text" id="ollamaUrlInput" placeholder="http://localhost:11434"
+        style="width:100%;max-width:400px;margin-top:4px"
+        oninput="S.ollamaUrl=this.value">
+      <p style="font-size:11px;color:var(--dim);margin-top:6px">
+        Install Ollama free at <a href="https://ollama.com" target="_blank" rel="noopener" style="color:var(--accent)">ollama.com</a>,
+        then run <code style="font-size:11px">ollama pull llama3</code>.
+        No API key or internet access needed.
+      </p>
+    </div>
+
+    <!-- API key (shown for cloud providers) -->
+    <div id="apiKeyRow" style="display:none">
+      <label id="apiKeyLabel" style="font-size:12px;color:var(--muted)">API Key</label>
+      <input type="password" id="apiKeyInput" placeholder="Enter your free API key…"
+        style="width:100%;max-width:400px;margin-top:4px"
+        oninput="S.apiKey=this.value">
+      <p id="apiKeyHint" style="font-size:11px;color:var(--dim);margin-top:6px"></p>
+    </div>
+
+    <!-- Model override (always visible) -->
+    <div>
+      <label style="font-size:12px;color:var(--muted)">Model <span style="color:var(--dim)">(leave blank for default)</span></label>
+      <input type="text" id="modelInput" placeholder="e.g. llama3, mixtral-8x7b-32768, gemini-1.5-flash…"
+        style="width:100%;max-width:400px;margin-top:4px"
+        oninput="S.model=this.value">
+    </div>
+
+  </div>
 </div>
 
 <!-- ── LAYOUT ─────────────────────────────────────────────────────────────────── -->
@@ -269,7 +311,11 @@ const S = {
   stage:     'idle', // 'idle'|'generating'|'generated'|'satisfied'
   files:     null,   // {requestDto,responseDto,serviceInterface,serviceImpl,transformer,controller}
   chat:      [],     // [{role,content}]
-  apiKey:    '',
+  // LLM provider settings
+  provider:  'ollama',              // 'ollama'|'groq'|'gemini'|'openai'
+  apiKey:    '',                    // API key for cloud providers
+  ollamaUrl: 'http://localhost:11434', // base URL for local Ollama
+  model:     '',                    // override model (empty = use provider default)
   settOpen:  false,
   codeTab:   'controller',
   testTab:   'unit',
@@ -471,7 +517,7 @@ function renderOpView(){
     <div class="card">
       <h3 style="font-size:13px;font-weight:600;color:#fff;margin-bottom:12px">
         💬 Refine with AI
-        ${!S.apiKey?'<span style="font-size:11px;font-weight:400;color:var(--amber);margin-left:8px">(add OpenAI API key in ⚙ Settings to enable)</span>':''}
+        ${!_aiEnabled()?'<span style="font-size:11px;font-weight:400;color:var(--amber);margin-left:8px">(configure AI provider in ⚙ Settings to enable)</span>':''}
       </h3>
       ${S.chat.length?`
       <div class="chat-log" id="chatLog">
@@ -481,8 +527,8 @@ function renderOpView(){
           </div>`).join('')}
       </div>`:'<p style="font-size:12px;color:var(--dim);margin-bottom:8px">Ask the AI to improve the generated code — add error handling, input validation, logging, etc.</p>'}
       <div class="chat-bar">
-        <input type="text" id="chatIn" placeholder="e.g. Add comprehensive error handling and validation…" ${!S.apiKey||S.chatBusy?'disabled':''}>
-        <button class="btn btn-primary" onclick="doChat()" ${!S.apiKey||S.chatBusy?'disabled':''} style="padding:8px 16px">
+        <input type="text" id="chatIn" placeholder="e.g. Add comprehensive error handling and validation…" ${!_aiEnabled()||S.chatBusy?'disabled':''}>
+        <button class="btn btn-primary" onclick="doChat()" ${!_aiEnabled()||S.chatBusy?'disabled':''} style="padding:8px 16px">
           ${S.chatBusy?'<span class="spin"></span>':'Send'}
         </button>
       </div>
@@ -518,11 +564,10 @@ function renderTests(op){
       <button class="btn" onclick="doGenTests()" ${S.testStage==='generating'?'disabled':''}>
         ${S.testStage==='generating'?'<span class="spin"></span> Generating…':'📋 Generate Template Tests'}
       </button>
-      ${S.apiKey?`
+      ${_aiEnabled()?`
       <button class="btn" onclick="doAiTests()" ${S.aiBusy?'disabled':''}>
         ${S.aiBusy?'<span class="spin"></span>':'🤖'} AI-Enhanced Tests
-      </button>`:''}
-    </div>
+      </button>`:'<span style="font-size:11px;color:var(--dim)">Configure AI provider in ⚙ Settings for AI-enhanced tests</span>'}    </div>
     ${hasTests?`
     <div class="tabs">
       <button class="tab${S.testTab==='unit'?' active':''}" onclick="setTestTab('unit')">${S.lang==='java'?'JUnit 5':'pytest'}</button>
@@ -563,11 +608,42 @@ function activeTestCode(){ return S.testTab==='unit'?S.unitTests:S.robotTests }
 // ─────────────────────────────────────────────────────────────────────────────
 // Actions
 // ─────────────────────────────────────────────────────────────────────────────
+// ─── Provider hints shown in the settings panel ───────────────────────────────
+const _PROVIDER_HINTS = {
+  groq:   { label:'Groq API Key', hint:'Get a free key at <a href="https://console.groq.com" target="_blank" rel="noopener" style="color:var(--accent)">console.groq.com</a>. No credit card required.' },
+  gemini: { label:'Gemini API Key', hint:'Get a free key at <a href="https://aistudio.google.com" target="_blank" rel="noopener" style="color:var(--accent)">aistudio.google.com</a>. Generous free quota.' },
+  openai: { label:'OpenAI API Key', hint:'Requires credits. Visit <a href="https://platform.openai.com" target="_blank" rel="noopener" style="color:var(--accent)">platform.openai.com</a>.' },
+};
+
+function _aiEnabled(){ return S.provider==='ollama' || !!S.apiKey; }
+
+function setProvider(p){
+  S.provider=p;
+  const isOllama = p==='ollama';
+  document.getElementById('ollamaUrlRow').style.display = isOllama ? '' : 'none';
+  document.getElementById('apiKeyRow').style.display    = isOllama ? 'none' : '';
+  if(!isOllama){
+    const h=_PROVIDER_HINTS[p]||{label:'API Key',hint:''};
+    document.getElementById('apiKeyLabel').textContent=h.label;
+    document.getElementById('apiKeyHint').innerHTML=h.hint;
+    document.getElementById('apiKeyInput').value=S.apiKey;
+  }
+  // highlight active provider button
+  ['ollama','groq','gemini','openai'].forEach(id=>{
+    const b=document.getElementById('pBtn-'+id);
+    if(b) b.classList.toggle('active', id===p);
+  });
+}
+
 function toggleSettings(){
   S.settOpen=!S.settOpen;
   const p=document.getElementById('settingsPanel');
   p.style.display=S.settOpen?'':'none';
-  if(S.settOpen) document.getElementById('apiKeyInput').value=S.apiKey;
+  if(S.settOpen){
+    setProvider(S.provider);
+    document.getElementById('ollamaUrlInput').value=S.ollamaUrl;
+    document.getElementById('modelInput').value=S.model;
+  }
 }
 
 function setLang(l){
@@ -639,14 +715,15 @@ function setTestTab(t){
 async function doChat(){
   const inp=document.getElementById('chatIn');
   const msg=(inp?inp.value:'').trim();
-  if(!msg||!S.apiKey||S.chatBusy)return;
+  if(!msg||!_aiEnabled()||S.chatBusy)return;
   S.chat.push({role:'user',content:msg});
   S.chatBusy=true;
   if(inp) inp.value='';
   renderMain();
   try{
     const res=await post('/api/ai-refine',{
-      apiKey:S.apiKey, operationName:S.op.name,
+      provider:S.provider, apiKey:S.apiKey, model:S.model, ollamaUrl:S.ollamaUrl,
+      operationName:S.op.name,
       history:S.chat.slice(0,-1), files:S.files,
       language:S.lang, userMessage:msg,
     });
@@ -681,11 +758,12 @@ async function doGenTests(){
 }
 
 async function doAiTests(){
-  if(!S.apiKey||S.aiBusy)return;
+  if(!_aiEnabled()||S.aiBusy)return;
   S.aiBusy=true; renderMain();
   try{
     const res=await post('/api/ai-tests',{
-      apiKey:S.apiKey, operationName:S.op.name,
+      provider:S.provider, apiKey:S.apiKey, model:S.model, ollamaUrl:S.ollamaUrl,
+      operationName:S.op.name,
       files:S.files, language:S.lang,
     });
     if(res.error){ alert('AI test error: '+res.error); }

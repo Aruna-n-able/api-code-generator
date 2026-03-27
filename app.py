@@ -10,7 +10,17 @@ Simpler deployment (no Node.js, no build step required):
 
 The complete UI is served as a single static HTML file (static/index.html).
 All WSDL parsing and code generation runs here in Python, with an optional
-OpenAI proxy endpoint for AI-assisted refinement.
+LLM proxy endpoint for AI-assisted refinement.
+
+Supported free LLM providers
+─────────────────────────────
+• Ollama   — local, completely free, no key required
+             https://ollama.com
+• Groq     — free cloud tier (Llama 3, Mixtral), free API key from
+             https://console.groq.com
+• Gemini   — free cloud tier (Gemini 1.5 Flash), free API key from
+             https://aistudio.google.com
+• OpenAI   — paid (kept for compatibility)
 """
 
 from __future__ import annotations
@@ -1359,23 +1369,82 @@ def api_generate_tests():
         return jsonify({"error": str(exc)}), 500
 
 
-@app.route("/api/ai-refine", methods=["POST"])
-def api_ai_refine():
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM provider helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Default model names per provider
+_PROVIDER_DEFAULTS: dict[str, str] = {
+    "ollama":  "llama3",
+    "groq":    "llama-3.3-70b-versatile",
+    "gemini":  "gemini-1.5-flash",
+    "openai":  "gpt-4o",
+}
+
+#: OpenAI-compatible base URLs for each cloud provider
+_PROVIDER_URLS: dict[str, str] = {
+    "groq":   "https://api.groq.com/openai/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+}
+
+
+def _build_llm_client(provider: str, api_key: str, ollama_url: str = "http://localhost:11434"):
+    """Return an OpenAI-compatible client for the requested provider.
+
+    All four supported providers expose an OpenAI-compatible chat-completions
+    API, so a single client type works for all of them.
+
+    Args:
+        provider:   One of 'ollama', 'groq', 'gemini', 'openai'.
+        api_key:    API key (ignored / may be empty for Ollama).
+        ollama_url: Base URL of the local Ollama server.
+
+    Returns:
+        (client, model_default) tuple.
+    """
     try:
         from openai import OpenAI  # noqa: PLC0415
-    except ImportError:
-        return jsonify({"error": "openai package not installed. Run: pip install openai"}), 500
+    except ImportError as exc:
+        raise RuntimeError("openai package not installed. Run: pip install openai") from exc
 
-    body = request.get_json(force=True) or {}
-    api_key = (body.get("apiKey") or "").strip()
+    provider = (provider or "ollama").lower().strip()
+    model_default = _PROVIDER_DEFAULTS.get(provider, "llama3")
+
+    if provider == "ollama":
+        base = ollama_url.rstrip("/")
+        return OpenAI(base_url=f"{base}/v1", api_key="ollama"), model_default
+
+    if provider in _PROVIDER_URLS:
+        if not api_key:
+            raise ValueError(f"An API key is required for the {provider} provider.")
+        return OpenAI(base_url=_PROVIDER_URLS[provider], api_key=api_key), model_default
+
+    # openai (default)
     if not api_key:
-        return jsonify({"error": "No OpenAI API key provided"}), 400
+        raise ValueError("An API key is required for the openai provider.")
+    return OpenAI(api_key=api_key), model_default
 
-    op_name = body.get("operationName", "")
-    history = body.get("history", [])
-    files = body.get("files", {})
-    lang = body.get("language", "java")
+
+@app.route("/api/ai-refine", methods=["POST"])
+def api_ai_refine():
+    body = request.get_json(force=True) or {}
+    provider  = (body.get("provider")  or "ollama").lower().strip()
+    api_key   = (body.get("apiKey")    or "").strip()
+    model_req = (body.get("model")     or "").strip()
+    ollama_url = (body.get("ollamaUrl") or "http://localhost:11434").strip()
+
+    op_name      = body.get("operationName", "")
+    history      = body.get("history", [])
+    files        = body.get("files", {})
+    lang         = body.get("language", "java")
     user_message = body.get("userMessage", "")
+
+    try:
+        client, model_default = _build_llm_client(provider, api_key, ollama_url)
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    model = model_req or model_default
 
     if lang == "java":
         system = (
@@ -1409,9 +1478,8 @@ def api_ai_refine():
     messages.append({"role": "user", "content": user_message})
 
     try:
-        client = OpenAI(api_key=api_key)
         completion = client.chat.completions.create(
-            model="gpt-4o", messages=messages, temperature=0.3
+            model=model, messages=messages, temperature=0.3
         )
         reply = completion.choices[0].message.content or ""
         updated = {}
@@ -1424,22 +1492,25 @@ def api_ai_refine():
 
 @app.route("/api/ai-tests", methods=["POST"])
 def api_ai_tests():
-    try:
-        from openai import OpenAI  # noqa: PLC0415
-    except ImportError:
-        return jsonify({"error": "openai package not installed. Run: pip install openai"}), 500
-
     body = request.get_json(force=True) or {}
-    api_key = (body.get("apiKey") or "").strip()
-    if not api_key:
-        return jsonify({"error": "No OpenAI API key provided"}), 400
+    provider   = (body.get("provider")   or "ollama").lower().strip()
+    api_key    = (body.get("apiKey")     or "").strip()
+    model_req  = (body.get("model")      or "").strip()
+    ollama_url = (body.get("ollamaUrl")  or "http://localhost:11434").strip()
 
     op_name = body.get("operationName", "")
-    files = body.get("files", {})
-    lang = body.get("language", "java")
-    tag = "java" if lang == "java" else "python"
-    framework = "JUnit 5 / Mockito" if lang == "java" else "pytest + unittest.mock"
-    framework_name = "Spring Boot" if lang == "java" else "FastAPI"
+    files   = body.get("files", {})
+    lang    = body.get("language", "java")
+    tag     = "java" if lang == "java" else "python"
+    framework      = "JUnit 5 / Mockito" if lang == "java" else "pytest + unittest.mock"
+    framework_name = "Spring Boot"       if lang == "java" else "FastAPI"
+
+    try:
+        client, model_default = _build_llm_client(provider, api_key, ollama_url)
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    model = model_req or model_default
 
     code_ctx = "\n".join(f"### {k}\n```{tag}\n{v}\n```" for k, v in files.items())
     prompt = (
@@ -1452,17 +1523,16 @@ def api_ai_tests():
     )
 
     try:
-        client = OpenAI(api_key=api_key)
         completion = client.chat.completions.create(
-            model="gpt-4o",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
         reply = completion.choices[0].message.content or ""
-        unit_m = re.search(rf"```{tag}:unitTests\n([\s\S]*?)```", reply)
+        unit_m  = re.search(rf"```{tag}:unitTests\n([\s\S]*?)```", reply)
         robot_m = re.search(r"```robot:robotTests\n([\s\S]*?)```", reply)
         return jsonify({
-            "unitTests": unit_m.group(1).rstrip() if unit_m else "",
+            "unitTests":  unit_m.group(1).rstrip()  if unit_m  else "",
             "robotTests": robot_m.group(1).rstrip() if robot_m else "",
         })
     except Exception as exc:  # noqa: BLE001
