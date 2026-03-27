@@ -558,7 +558,7 @@ class FlakyTestAnalysisSkill:
             flaky_metrics,
             root_cause,
             recommended_solution,
-            use_ai=use_ai,
+            use_ai=use_ai and not ai_error_hint,
             recommendations=ticket_recommendations,
             ai_key_set=bool(self._api_key),
             ai_error_hint=ai_error_hint,
@@ -1020,10 +1020,14 @@ class FlakyTestAnalysisSkill:
                 if has_patterns
                 else "See Robot Framework test results above."
             )
+            if ai_error_hint:
+                intro = f"_AI analysis unavailable ({ai_error_hint})."
+            else:
+                intro = "_AI analysis skipped (`--no-ai`)."
             lines += [
                 "## 🔍 Root Cause",
                 "",
-                f"_AI analysis skipped (`--no-ai`). {suffix}_",
+                f"{intro} {suffix}_",
                 "",
             ]
         else:

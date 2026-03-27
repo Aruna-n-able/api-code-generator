@@ -721,8 +721,8 @@ class TestAnalyzeTicket:
         assert report.root_cause == ""
         # Should NOT tell user to set the key (it is set)
         assert "Set `ANTHROPIC_API_KEY`" not in report.formatted_report
-        # Should describe the specific failure cause in the report
-        assert "AI analysis failed" in report.formatted_report
+        # Should describe the specific failure cause in the report, with graceful fallback wording
+        assert "AI analysis unavailable" in report.formatted_report
         assert "model not found" in report.formatted_report
 
     def test_analyze_ticket_ai_calls_claude_when_key_set(self):
