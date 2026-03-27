@@ -1185,3 +1185,348 @@ class TestAnthropicErrorHandling:
         # _ANTHROPIC_AVAILABLE is False → the AI function must NOT have been called
         spy.assert_not_called()
         assert report.root_cause == ""
+
+
+# ===========================================================================
+# OpenAI support
+# ===========================================================================
+
+class TestOpenAISupport:
+    """Tests covering OpenAI as an alternative AI provider."""
+
+    def _make_openai_error(self, status_code: int, message: str):
+        """Build a minimal fake that quacks like openai.APIStatusError."""
+        exc = Exception(f"Error code: {status_code} - {message}")
+        exc.status_code = status_code
+        return exc
+
+    # ------------------------------------------------------------------
+    # Constructor / configuration
+    # ------------------------------------------------------------------
+
+    def test_skill_accepts_openai_api_key_parameter(self):
+        """FlakyTestAnalysisSkill stores the openai_api_key passed directly."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+        assert skill._openai_api_key == "sk-openai-test"
+
+    def test_skill_reads_openai_api_key_from_env(self):
+        """When openai_api_key is not passed, the OPENAI_API_KEY env var is used."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-env-key"}):
+            skill = FlakyTestAnalysisSkill()
+        assert skill._openai_api_key == "sk-env-key"
+
+    def test_skill_accepts_openai_model_parameter(self):
+        """FlakyTestAnalysisSkill stores the openai_model passed directly."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill(openai_model="gpt-4-turbo")
+        assert skill._openai_model == "gpt-4-turbo"
+
+    def test_openai_model_default_is_gpt4o(self):
+        """The default OpenAI model is gpt-4o."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill()
+        assert skill._openai_model == "gpt-4o"
+
+    # ------------------------------------------------------------------
+    # _generate_root_cause_analysis_openai – happy path
+    # ------------------------------------------------------------------
+
+    def test_generate_root_cause_analysis_openai_success(self):
+        """OpenAI root-cause analysis returns parsed root_cause and solution."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** The test relies on a real clock.\n\n"
+            "**Recommended Solution:** Use freezegun."
+        )
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            rc, sol, err = skill._generate_root_cause_analysis_openai(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert "real clock" in rc
+        assert "freezegun" in sol
+        assert err == ""
+
+    # ------------------------------------------------------------------
+    # _generate_root_cause_analysis_openai – error handling
+    # ------------------------------------------------------------------
+
+    def test_root_cause_openai_returns_empty_on_quota_error(self, caplog):
+        """OpenAI quota error is caught and returns ('', '', error_hint)."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        quota_exc = self._make_openai_error(
+            429,
+            "You exceeded your current quota, please check your plan."
+        )
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = quota_exc
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis_openai(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result[:2] == ("", "")
+        assert result[2]  # error_hint must be non-empty
+
+    def test_root_cause_openai_returns_empty_on_auth_error(self, caplog):
+        """OpenAI 401 error is caught and returns ('', '', error_hint)."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        auth_exc = self._make_openai_error(401, "Incorrect API key provided.")
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = auth_exc
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="bad-key")
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            result = skill._generate_root_cause_analysis_openai(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result[:2] == ("", "")
+        assert result[2]
+
+    def test_root_cause_openai_returns_empty_when_package_missing(self):
+        """When _OPENAI_AVAILABLE is False the method returns ('', '', '')."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", False):
+            result = skill._generate_root_cause_analysis_openai(
+                issue={"key": "X-1", "status": "Open", "summary": "Test"},
+                attachments=[],
+                robot_runs=[],
+                flaky_metrics=[],
+            )
+
+        assert result == ("", "", "")
+
+    # ------------------------------------------------------------------
+    # analyze_ticket – OpenAI used when Anthropic not configured
+    # ------------------------------------------------------------------
+
+    def test_analyze_ticket_uses_openai_when_no_anthropic_key(self):
+        """When only OPENAI_API_KEY is set, analyze_ticket uses OpenAI."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        mock_jira = _make_jira_mock()
+
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Network timeout.\n"
+            "**Recommended Solution:** Add retry logic."
+        )
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test", jira_client=mock_jira)
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "Network timeout" in report.root_cause
+        assert "retry" in report.recommended_solution
+
+    def test_analyze_ticket_falls_back_to_openai_when_anthropic_fails(self):
+        """When Anthropic fails, OpenAI is tried as a fallback."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        mock_jira = _make_jira_mock()
+
+        fake_anthropic = MagicMock()
+        fake_anthropic.Anthropic.return_value.messages.create.side_effect = Exception(
+            "credit balance is too low"
+        )
+
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Timeout in CI.\n"
+            "**Recommended Solution:** Increase timeout."
+        )
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+
+        skill = FlakyTestAnalysisSkill(
+            anthropic_api_key="sk-ant-key",
+            openai_api_key="sk-openai-key",
+            jira_client=mock_jira,
+        )
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", True), \
+             patch.object(skill_module, "_anthropic", fake_anthropic, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "Timeout in CI" in report.root_cause
+
+    def test_analyze_ticket_no_ai_skips_openai(self):
+        """With use_ai=False, neither Anthropic nor OpenAI should be called."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        mock_jira = _make_jira_mock()
+        skill = FlakyTestAnalysisSkill(
+            openai_api_key="sk-openai-test", jira_client=mock_jira
+        )
+
+        with patch.object(skill, "_generate_root_cause_analysis_openai",
+                          wraps=skill._generate_root_cause_analysis_openai) as spy:
+            report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        spy.assert_not_called()
+        assert report.root_cause == ""
+
+    # ------------------------------------------------------------------
+    # _generate_ai_summary_openai – happy path
+    # ------------------------------------------------------------------
+
+    def test_generate_ai_summary_openai_success(self):
+        """OpenAI summary generation returns the model response text."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+        from skills.flaky_test_analysis.metrics import TestMetrics
+
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "Several tests are intermittently failing due to timing."
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+
+        metric = MagicMock(spec=TestMetrics)
+        metric.flakiness_score = "High"
+        metric.name = "test_foo"
+        metric.failure_rate_display = "50%"
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            result = skill._generate_ai_summary_openai([metric], {})
+
+        assert "timing" in result
+
+    def test_generate_ai_summary_openai_returns_empty_on_error(self, caplog):
+        """OpenAI API errors during summary generation are caught; returns ''."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+        from skills.flaky_test_analysis.metrics import TestMetrics
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = Exception(
+            "exceeded your current quota"
+        )
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+
+        metric = MagicMock(spec=TestMetrics)
+        metric.flakiness_score = "High"
+        metric.name = "test_foo"
+        metric.failure_rate_display = "50%"
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            result = skill._generate_ai_summary_openai([metric], {})
+
+        assert result == ""
+
+    def test_generate_ai_summary_openai_returns_stable_message_when_no_flaky(self):
+        """When there are no flaky tests, returns the standard stable message."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+        from skills.flaky_test_analysis.metrics import TestMetrics
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+
+        metric = MagicMock(spec=TestMetrics)
+        metric.flakiness_score = "Stable"
+
+        with patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            result = skill._generate_ai_summary_openai([metric], {})
+
+        assert "No flaky tests" in result
+
+    # ------------------------------------------------------------------
+    # run_analysis – routes to OpenAI when Anthropic not available
+    # ------------------------------------------------------------------
+
+    def test_run_analysis_uses_openai_when_anthropic_not_available(self):
+        """run_analysis calls _generate_ai_summary_openai when OpenAI is the only provider."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-openai-test")
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill, "_generate_ai_summary_openai",
+                          return_value="OpenAI summary") as mock_summary:
+            report = skill.run_analysis(
+                [str(SAMPLE_RUN1)],
+                use_ai_summary=True,
+            )
+
+        mock_summary.assert_called_once()
+        assert report.ai_summary == "OpenAI summary"
+
+    # ------------------------------------------------------------------
+    # CLI – --openai-model argument
+    # ------------------------------------------------------------------
+
+    def test_cli_openai_model_arg_is_passed_to_skill(self):
+        """--openai-model CLI argument is forwarded to FlakyTestAnalysisSkill."""
+        from run_flaky_analysis import main
+
+        _FAKE_JIRA_ENV = {
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_USER_EMAIL": "ci@example.com",
+            "JIRA_API_TOKEN": "fake-token",
+        }
+        mock_report = MagicMock()
+        mock_report.formatted_report = "# Done"
+        mock_report.flaky_metrics = []
+
+        with patch.dict("os.environ", _FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill:
+            MockSkill.return_value.analyze_ticket.return_value = mock_report
+            with pytest.raises(SystemExit):
+                main(["--jira-ticket", "NCCF-1", "--no-ai", "--no-post",
+                      "--openai-model", "gpt-4-turbo"])
+
+        _, kwargs = MockSkill.call_args
+        assert kwargs.get("openai_model") == "gpt-4-turbo"

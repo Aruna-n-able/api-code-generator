@@ -26,7 +26,7 @@ MODE 2 – Jira ticket-driven analysis (new)
       2. Download all attachments.
       3. Parse any Robot Framework output.xml files found.
       4. Extract and analyse log files (HTML tags are stripped automatically).
-      5. Use Claude to identify the root cause and recommend a fix.
+      5. Use Claude or OpenAI to identify the root cause and recommend a fix.
       6. Post the analysis back to the Jira ticket (unless --no-post is given).
 
 Examples
@@ -138,8 +138,9 @@ def parse_args(argv=None):
         "--no-ai",
         action="store_true",
         default=False,
-        help="Skip the Claude AI analysis step. "
-             "Useful when ANTHROPIC_API_KEY is not set or for offline use.",
+        help="Skip the AI analysis step (Claude or OpenAI). "
+             "Useful when neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set "
+             "or for offline use.",
     )
     parser.add_argument(
         "--output-file",
@@ -151,7 +152,14 @@ def parse_args(argv=None):
     parser.add_argument(
         "--model",
         default="claude-sonnet-4-6",
-        help="Claude model to use (default: claude-sonnet-4-6).",
+        help="Anthropic Claude model to use (default: claude-sonnet-4-6).",
+    )
+    parser.add_argument(
+        "--openai-model",
+        default="gpt-4o",
+        help="OpenAI model to use when OPENAI_API_KEY is set "
+             "(default: gpt-4o). Anthropic is tried first; OpenAI is "
+             "used as a fallback.",
     )
     parser.add_argument(
         "--patterns-file",
@@ -202,6 +210,7 @@ def main(argv=None):
     try:
         skill = FlakyTestAnalysisSkill(
             claude_model=args.model,
+            openai_model=args.openai_model,
             patterns_file=args.patterns_file,
         )
     except ImportError as exc:
@@ -244,7 +253,7 @@ def main(argv=None):
                 "\n"
                 "Create an API token at: https://id.atlassian.com/manage-profile/security/api-tokens\n"
                 "\n"
-                "Add --no-ai to skip the Claude step if ANTHROPIC_API_KEY is also unset.",
+                "Add --no-ai to skip the AI step if neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -261,7 +270,7 @@ def main(argv=None):
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR: Unexpected failure analysing ticket {args.jira_ticket}: {exc}", file=sys.stderr)
             print(
-                "Tip: if the error is AI-related, re-run with --no-ai to skip the Claude step.",
+                "Tip: if the error is AI-related, re-run with --no-ai to skip the AI step.",
                 file=sys.stderr,
             )
             if args.verbose:

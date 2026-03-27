@@ -53,6 +53,12 @@ try:
 except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
+try:
+    import openai as _openai
+    _OPENAI_AVAILABLE = True
+except ImportError:
+    _OPENAI_AVAILABLE = False
+
 
 def _handle_anthropic_error(exc: Exception) -> str:
     """Log a clear, actionable message for an Anthropic API error.
@@ -96,6 +102,53 @@ def _handle_anthropic_error(exc: Exception) -> str:
     else:
         logger.warning(
             "Claude API error (HTTP %s): %s\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            status,
+            exc,
+        )
+        return f"API error (HTTP {status})"
+
+
+def _handle_openai_error(exc: Exception) -> str:
+    """Log a clear, actionable message for an OpenAI API error.
+
+    Returns a short, user-facing description of the error suitable for
+    inclusion in the formatted report.
+    """
+    msg = str(exc)
+    status = getattr(exc, "status_code", None)
+    if "insufficient_quota" in msg or "exceeded your current quota" in msg:
+        logger.error(
+            "OpenAI API error: your quota has been exceeded.\n"
+            "  → Check your usage at https://platform.openai.com/usage\n"
+            "  → Or re-run with --no-ai to skip the AI step and still get the "
+            "pattern-based analysis."
+        )
+        return "billing error – OpenAI quota exceeded"
+    elif status == 401 or "authentication" in msg.lower() or "api_key" in msg.lower() or "Incorrect API key" in msg:
+        logger.error(
+            "OpenAI API authentication failed – verify OPENAI_API_KEY is correct.\n"
+            "  → Re-run with --no-ai to skip the AI step."
+        )
+        return "authentication error – check OPENAI_API_KEY"
+    elif status == 404 or "model_not_found" in msg or "does not exist" in msg:
+        logger.error(
+            "OpenAI API error: the requested model was not found.\n"
+            "  → Verify the model name is correct and available in your account.\n"
+            "  → See https://platform.openai.com/docs/models for valid IDs.\n"
+            "  → Re-run with --no-ai to skip the AI step."
+        )
+        return "model not found – check the OpenAI model name"
+    elif status is None:
+        logger.warning(
+            "OpenAI API call failed (connection or timeout): %s\n"
+            "  → Re-run with --no-ai to skip the AI step.",
+            exc,
+        )
+        return "connection or timeout error"
+    else:
+        logger.warning(
+            "OpenAI API error (HTTP %s): %s\n"
             "  → Re-run with --no-ai to skip the AI step.",
             status,
             exc,
@@ -196,9 +249,16 @@ class FlakyTestAnalysisSkill:
     ----------
     anthropic_api_key:
         Anthropic API key.  Falls back to the ``ANTHROPIC_API_KEY`` env var.
-        When not set, AI summarisation is skipped and rule-based output is used.
+        When not set, the skill tries OpenAI if ``OPENAI_API_KEY`` is set;
+        otherwise rule-based output is used.
     claude_model:
         Claude model to use for summarisation.
+    openai_api_key:
+        OpenAI API key.  Falls back to the ``OPENAI_API_KEY`` env var.
+        Used as the AI provider when Anthropic is not configured or when it
+        fails during a run.
+    openai_model:
+        OpenAI model to use (default: ``gpt-4o``).
     patterns_file:
         Path to a custom ``flaky_patterns.yaml``; uses the bundled one by default.
     jira_client:
@@ -210,11 +270,15 @@ class FlakyTestAnalysisSkill:
         self,
         anthropic_api_key: Optional[str] = None,
         claude_model: str = "claude-sonnet-4-6",
+        openai_api_key: Optional[str] = None,
+        openai_model: str = "gpt-4o",
         patterns_file: Optional[str] = None,
         jira_client: Optional[JiraClient] = None,
     ) -> None:
         self._api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._model = claude_model
+        self._openai_api_key = openai_api_key or os.environ.get("OPENAI_API_KEY", "")
+        self._openai_model = openai_model
         self._parser = RobotOutputParser()
         self._metrics_engine = MetricsEngine()
         self._pattern_db = (
@@ -244,8 +308,10 @@ class FlakyTestAnalysisSkill:
         jira_issue_key:
             When provided the formatted report is posted to this Jira issue.
         use_ai_summary:
-            Generate a natural-language summary using the Claude API.
-            Requires ``ANTHROPIC_API_KEY`` to be set.
+            Generate a natural-language summary using the configured AI provider
+            (Anthropic Claude if ``ANTHROPIC_API_KEY`` is set, otherwise OpenAI
+            if ``OPENAI_API_KEY`` is set).  When neither key is set the step is
+            skipped and rule-based output is used instead.
 
         Returns
         -------
@@ -269,8 +335,11 @@ class FlakyTestAnalysisSkill:
         recommendations = self._recommender.recommend_all(metrics, all_results)
 
         ai_summary = ""
-        if use_ai_summary and self._api_key and _ANTHROPIC_AVAILABLE:
-            ai_summary = self._generate_ai_summary(metrics, recommendations)
+        if use_ai_summary:
+            if self._api_key and _ANTHROPIC_AVAILABLE:
+                ai_summary = self._generate_ai_summary(metrics, recommendations)
+            elif self._openai_api_key and _OPENAI_AVAILABLE:
+                ai_summary = self._generate_ai_summary_openai(metrics, recommendations)
 
         formatted = self._format_report(metrics, recommendations, ai_summary, runs)
 
@@ -339,6 +408,56 @@ class FlakyTestAnalysisSkill:
             return message.content[0].text if message.content else ""
         except Exception as exc:
             _handle_anthropic_error(exc)
+            return ""
+
+    def _generate_ai_summary_openai(
+        self,
+        metrics: List[TestMetrics],
+        recommendations: Dict[str, List[Recommendation]],
+    ) -> str:
+        """Call OpenAI to produce a concise executive summary."""
+        if not _OPENAI_AVAILABLE:
+            logger.warning(
+                "openai package not installed; skipping AI summary. "
+                "Install with: pip install openai"
+            )
+            return ""
+
+        flaky_tests = [m for m in metrics if m.flakiness_score != "Stable"]
+        if not flaky_tests:
+            return "No flaky tests detected across the provided runs."
+
+        prompt_lines = [
+            "You are an expert in software testing and CI/CD reliability.",
+            "",
+            "Analyse the following flaky test data and write a concise executive summary "
+            "(4–8 sentences). Focus on the highest-severity issues, patterns found, and "
+            "the most impactful remediation steps. Do not repeat information verbatim "
+            "from the data; synthesise it for an engineering audience.",
+            "",
+            "## Flaky Tests Detected",
+            "",
+        ]
+        for m in flaky_tests:
+            prompt_lines.append(
+                f"- **{m.name}** | Score: {m.flakiness_score} | "
+                f"Failure rate: {m.failure_rate_display}"
+            )
+            recs = recommendations.get(m.name, [])
+            if recs:
+                patterns = ", ".join(r.pattern_name for r in recs)
+                prompt_lines.append(f"  Patterns: {patterns}")
+
+        try:
+            client = _openai.OpenAI(api_key=self._openai_api_key)
+            response = client.chat.completions.create(
+                model=self._openai_model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
+            )
+            return response.choices[0].message.content or "" if response.choices else ""
+        except Exception as exc:
+            _handle_openai_error(exc)
             return ""
 
     # ------------------------------------------------------------------
@@ -470,8 +589,9 @@ class FlakyTestAnalysisSkill:
         3. Classify attachments – Robot ``output.xml`` files are parsed by the
            existing :class:`RobotOutputParser`; HTML and plain-text log files
            have their text extracted (HTML tags are stripped automatically).
-        4. Feed all gathered context to Claude and ask for a structured root-
-           cause analysis and recommended fix.
+        4. Feed all gathered context to the configured AI provider (Claude or
+           OpenAI) and ask for a structured root-cause analysis and recommended
+           fix.
         5. Optionally post the result back to the ticket as a comment.
 
         Parameters
@@ -479,9 +599,11 @@ class FlakyTestAnalysisSkill:
         jira_issue_key:
             The Jira issue key, e.g. ``NCCF-1593628``.
         use_ai:
-            Use Claude to generate the root-cause analysis.  When *False* (or
-            when ``ANTHROPIC_API_KEY`` is not set) a rule-based summary is
-            produced instead.
+            Use an AI model to generate the root-cause analysis.  Anthropic
+            Claude is tried first (``ANTHROPIC_API_KEY``); OpenAI is used as a
+            fallback when Anthropic is not configured or fails
+            (``OPENAI_API_KEY``).  When *False*, or when neither key is set, a
+            rule-based summary is produced instead.
         post_comment:
             If *True* and the AI analysis succeeds, post the formatted report
             back to the Jira ticket as a comment.
@@ -544,14 +666,21 @@ class FlakyTestAnalysisSkill:
         root_cause = ""
         recommended_solution = ""
         ai_error_hint = ""
-        if use_ai and self._api_key and _ANTHROPIC_AVAILABLE:
-            root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis(
-                issue, attachment_infos, robot_runs, flaky_metrics
-            )
+        if use_ai:
+            if self._api_key and _ANTHROPIC_AVAILABLE:
+                root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis(
+                    issue, attachment_infos, robot_runs, flaky_metrics
+                )
+            if not root_cause and self._openai_api_key and _OPENAI_AVAILABLE:
+                # Use OpenAI if Anthropic is not configured or failed
+                root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis_openai(
+                    issue, attachment_infos, robot_runs, flaky_metrics
+                )
 
         # ----------------------------------------------------------------
         # Format report
         # ----------------------------------------------------------------
+        any_ai_key_set = bool(self._api_key) or bool(self._openai_api_key)
         formatted = self._format_ticket_report(
             issue,
             attachment_infos,
@@ -561,7 +690,7 @@ class FlakyTestAnalysisSkill:
             recommended_solution,
             use_ai=use_ai and not ai_error_hint,
             recommendations=ticket_recommendations,
-            ai_key_set=bool(self._api_key),
+            ai_key_set=any_ai_key_set,
             ai_error_hint=ai_error_hint,
         )
 
@@ -781,27 +910,14 @@ class FlakyTestAnalysisSkill:
     # AI root-cause analysis
     # ------------------------------------------------------------------
 
-    def _generate_root_cause_analysis(
+    def _build_root_cause_prompt(
         self,
         issue: Dict[str, Any],
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
-    ) -> Tuple[str, str, str]:
-        """
-        Ask Claude to identify the root cause and recommend a fix.
-
-        Returns a tuple of (root_cause, recommended_solution, error_hint) strings.
-        error_hint is non-empty only when the API call failed; it is a short,
-        user-facing description of what went wrong.
-        """
-        if not _ANTHROPIC_AVAILABLE:
-            logger.warning(
-                "anthropic package not installed; skipping AI analysis. "
-                "Install with: pip install anthropic"
-            )
-            return "", "", ""
-
+    ) -> str:
+        """Build the prompt used by both AI providers for root-cause analysis."""
         prompt_lines = [
             "",
             "A Jenkins build has failed and a Jira ticket has been created automatically.",
@@ -875,7 +991,30 @@ class FlakyTestAnalysisSkill:
                     "",
                 ]
 
-        prompt = "\n".join(prompt_lines)
+        return "\n".join(prompt_lines)
+
+    def _generate_root_cause_analysis(
+        self,
+        issue: Dict[str, Any],
+        attachments: List[AttachmentInfo],
+        robot_runs: List[ParsedRun],
+        flaky_metrics: List[TestMetrics],
+    ) -> Tuple[str, str, str]:
+        """
+        Ask Claude to identify the root cause and recommend a fix.
+
+        Returns a tuple of (root_cause, recommended_solution, error_hint) strings.
+        error_hint is non-empty only when the API call failed; it is a short,
+        user-facing description of what went wrong.
+        """
+        if not _ANTHROPIC_AVAILABLE:
+            logger.warning(
+                "anthropic package not installed; skipping AI analysis. "
+                "Install with: pip install anthropic"
+            )
+            return "", "", ""
+
+        prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
 
         try:
             client = _anthropic.Anthropic(api_key=self._api_key)
@@ -891,6 +1030,48 @@ class FlakyTestAnalysisSkill:
             return "", "", error_hint
 
         # Split the response into root cause / solution sections
+        root_cause, recommended_solution = self._parse_ai_response(full_response)
+        return root_cause, recommended_solution, ""
+
+    def _generate_root_cause_analysis_openai(
+        self,
+        issue: Dict[str, Any],
+        attachments: List[AttachmentInfo],
+        robot_runs: List[ParsedRun],
+        flaky_metrics: List[TestMetrics],
+    ) -> Tuple[str, str, str]:
+        """
+        Ask OpenAI to identify the root cause and recommend a fix.
+
+        Returns a tuple of (root_cause, recommended_solution, error_hint) strings.
+        error_hint is non-empty only when the API call failed; it is a short,
+        user-facing description of what went wrong.
+        """
+        if not _OPENAI_AVAILABLE:
+            logger.warning(
+                "openai package not installed; skipping AI analysis. "
+                "Install with: pip install openai"
+            )
+            return "", "", ""
+
+        prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
+
+        try:
+            client = _openai.OpenAI(api_key=self._openai_api_key)
+            response = client.chat.completions.create(
+                model=self._openai_model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            full_response = (
+                response.choices[0].message.content or ""
+                if response.choices
+                else ""
+            )
+        except Exception as exc:
+            error_hint = _handle_openai_error(exc)
+            return "", "", error_hint
+
         root_cause, recommended_solution = self._parse_ai_response(full_response)
         return root_cause, recommended_solution, ""
 
