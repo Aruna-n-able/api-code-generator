@@ -908,6 +908,43 @@ class TestAnalyzeTicket:
         assert FlakyTestAnalysisSkill._is_zip_archive("noextension", zip_magic) is True
         assert FlakyTestAnalysisSkill._is_zip_archive("noextension", b"not a zip") is False
 
+    def test_zip_attachment_formatted_report_shows_summary_not_member_names(self):
+        """The formatted report should show ZIP as one line with a file count,
+        not expand every extracted filename in the Attachments Found section."""
+        import io
+        import zipfile
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("build.log", "ERROR: timeout")
+            zf.writestr("report.html", "<html>ok</html>")
+        zip_bytes = buf.getvalue()
+
+        attachments = [
+            {
+                "id": "10",
+                "filename": "results.zip",
+                "mimeType": "application/zip",
+                "size": len(zip_bytes),
+                "content": "https://example.atlassian.net/secure/attachment/10/results.zip",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = zip_bytes
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+
+        # The ZIP itself should appear with a file count
+        assert "results.zip" in report.formatted_report
+        assert "unzipped" in report.formatted_report
+        assert "2 file(s) found" in report.formatted_report
+        # Individual member names must NOT appear in the formatted report's attachments section
+        assert "build.log" not in report.formatted_report
+        assert "report.html" not in report.formatted_report
+        # The raw AttachmentInfo objects for members are still available for AI/pattern analysis
+        assert any("build.log" in a.filename for a in report.attachments)
+
 
 # ===========================================================================
 # CLI – --jira-ticket argument

@@ -164,6 +164,7 @@ class AttachmentInfo:
     size: int
     text_content: str = ""
     is_robot_xml: bool = False
+    is_zip_member: bool = False
 
 
 @dataclass
@@ -746,6 +747,7 @@ class FlakyTestAnalysisSkill:
                                     "[Robot Framework output.xml – parsed separately]"
                                 ),
                                 is_robot_xml=True,
+                                is_zip_member=True,
                             )
                         )
                     else:
@@ -756,6 +758,7 @@ class FlakyTestAnalysisSkill:
                                 mime_type="",
                                 size=entry.file_size,
                                 text_content=text[: self._MAX_ATTACHMENT_CHARS],
+                                is_zip_member=True,
                             )
                         )
         except zipfile.BadZipFile as exc:
@@ -954,11 +957,29 @@ class FlakyTestAnalysisSkill:
         # Attachments inventory
         if attachments:
             lines += ["## Attachments Found", ""]
+            # Count how many files were extracted from each ZIP so the parent
+            # line can show a summary instead of listing every member filename.
+            zip_member_counts: Dict[str, int] = {}
             for att in attachments:
-                icon = "🤖" if att.is_robot_xml else "📄"
+                if att.is_zip_member:
+                    parent = att.filename.split("/", 1)[0]
+                    zip_member_counts[parent] = zip_member_counts.get(parent, 0) + 1
+            for att in attachments:
+                if att.is_zip_member:
+                    continue  # shown as part of the parent ZIP line
+                member_count = zip_member_counts.get(att.filename)
+                if member_count is not None:
+                    icon = "📦"
+                    suffix = f" – unzipped, {member_count} file(s) found"
+                elif att.is_robot_xml:
+                    icon = "🤖"
+                    suffix = ""
+                else:
+                    icon = "📄"
+                    suffix = ""
                 lines.append(
                     f"- {icon} `{att.filename}` ({att.mime_type or 'unknown'}, "
-                    f"{att.size:,} bytes)"
+                    f"{att.size:,} bytes){suffix}"
                 )
             lines.append("")
 
