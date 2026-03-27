@@ -184,7 +184,7 @@ class FlakyTestAnalysisSkill:
     def __init__(
         self,
         anthropic_api_key: Optional[str] = None,
-        claude_model: str = "claude-3-5-sonnet-20241022",
+        claude_model: str = "claude-sonnet-4-5-20250929",
         patterns_file: Optional[str] = None,
         jira_client: Optional[JiraClient] = None,
     ) -> None:
@@ -535,6 +535,7 @@ class FlakyTestAnalysisSkill:
             recommended_solution,
             use_ai=use_ai,
             recommendations=ticket_recommendations,
+            ai_key_set=bool(self._api_key),
         )
 
         report = TicketAnalysisReport(
@@ -908,6 +909,7 @@ class FlakyTestAnalysisSkill:
         recommended_solution: str,
         use_ai: bool = True,
         recommendations: Optional[Dict[str, List[Recommendation]]] = None,
+        ai_key_set: bool = False,
     ) -> str:
         if recommendations is None:
             recommendations = {}
@@ -997,12 +999,21 @@ class FlakyTestAnalysisSkill:
                 "",
             ]
         else:
-            lines += [
-                "## 🔍 Root Cause",
-                "",
-                "_AI analysis not available. Set `ANTHROPIC_API_KEY` to enable._",
-                "",
-            ]
+            if ai_key_set:
+                lines += [
+                    "## 🔍 Root Cause",
+                    "",
+                    "_AI analysis failed. Check the logs for details (e.g. invalid model or "
+                    "API error). Re-run with `--no-ai` to skip the AI step._",
+                    "",
+                ]
+            else:
+                lines += [
+                    "## 🔍 Root Cause",
+                    "",
+                    "_AI analysis not available. Set `ANTHROPIC_API_KEY` to enable._",
+                    "",
+                ]
 
         # Recommended solution
         if recommended_solution:

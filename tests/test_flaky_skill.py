@@ -308,6 +308,15 @@ class TestFlakyTestAnalysisSkill:
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         self.skill = FlakyTestAnalysisSkill()
 
+    def test_default_model_is_current(self):
+        """The default Claude model must be a currently-available model ID."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        skill = FlakyTestAnalysisSkill()
+        # Must not reference the deprecated claude-3-5-sonnet-20241022 model
+        assert "claude-3-5-sonnet-20241022" not in skill._model
+        # Must be one of the known current model IDs
+        assert "claude-sonnet-4-5" in skill._model or "claude-sonnet-4" in skill._model
+
     def test_run_analysis_returns_report(self):
         report = self.skill.run_analysis(
             [SAMPLE_RUN1, SAMPLE_RUN2],
@@ -692,6 +701,28 @@ class TestAnalyzeTicket:
             report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
             # No API key → root_cause stays empty
             assert report.root_cause == ""
+            # Report should tell user to set the key
+            assert "Set `ANTHROPIC_API_KEY`" in report.formatted_report
+
+    def test_analyze_ticket_ai_failure_shows_check_logs_message(self):
+        """When the key IS set but the AI call fails, show 'check logs' not 'set key'."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()
+
+        with patch("skills.flaky_test_analysis.skill._ANTHROPIC_AVAILABLE", True), \
+             patch("skills.flaky_test_analysis.skill._anthropic", create=True) as mock_ant:
+            # Simulate any API error (e.g. model not found, billing, etc.)
+            mock_ant.APIStatusError = Exception
+            mock_ant.Anthropic.return_value.messages.create.side_effect = Exception("model_not_found")
+            skill = FlakyTestAnalysisSkill(anthropic_api_key="sk-test", jira_client=mock_jira)
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        # root_cause empty because the call failed
+        assert report.root_cause == ""
+        # Should NOT tell user to set the key (it is set)
+        assert "Set `ANTHROPIC_API_KEY`" not in report.formatted_report
+        # Should tell user to check logs
+        assert "Check the logs" in report.formatted_report
 
     def test_analyze_ticket_ai_calls_claude_when_key_set(self):
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill

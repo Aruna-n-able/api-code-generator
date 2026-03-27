@@ -231,7 +231,7 @@ options:
                         Requires JIRA_* environment variables.
   --no-ai               Skip Claude AI summary (useful without ANTHROPIC_API_KEY).
   --output-file PATH    Write the Markdown report to this file.
-  --model MODEL         Claude model to use (default: claude-3-5-sonnet-20241022).
+  --model MODEL         Claude model to use (default: claude-sonnet-4-5-20250929).
   --patterns-file PATH  Path to a custom flaky_patterns.yaml.
   --verbose, -v         Enable verbose logging.
 ```
@@ -247,7 +247,7 @@ from skills.flaky_test_analysis import FlakyTestAnalysisSkill
 
 skill = FlakyTestAnalysisSkill(
     anthropic_api_key="sk-ant-...",   # or set ANTHROPIC_API_KEY env var
-    claude_model="claude-3-5-sonnet-20241022",
+    claude_model="claude-sonnet-4-5-20250929",
 )
 
 report = skill.run_analysis(

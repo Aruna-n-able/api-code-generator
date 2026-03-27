@@ -150,8 +150,8 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--model",
-        default="claude-3-5-sonnet-20241022",
-        help="Claude model to use (default: claude-3-5-sonnet-20241022).",
+        default="claude-sonnet-4-5-20250929",
+        help="Claude model to use (default: claude-sonnet-4-5-20250929).",
     )
     parser.add_argument(
         "--patterns-file",
