@@ -1645,6 +1645,57 @@ def github_status():
     })
 
 
+@app.post("/api/github/credentials")
+def github_set_credentials():
+    """Accept GitHub credentials from the UI and apply them at runtime.
+
+    Request body (JSON):
+        username (str) — GitHub username
+        token    (str) — Personal access token
+
+    The credentials are stored in memory for the lifetime of the server
+    process.  They override any values set via environment variables.
+    Credentials are used only server-side and are never echoed back.
+    """
+    global _GH_USERNAME, _GH_TOKEN  # noqa: PLW0603
+
+    body = request.get_json(silent=True) or {}
+    username = (body.get("username") or "").strip()
+    token    = (body.get("token")    or "").strip()
+
+    if not token:
+        return jsonify({"ok": False, "error": "Token is required."}), 400
+
+    # Validate the credentials with a lightweight GitHub API call before
+    # committing them (GET /user returns the authenticated user's profile).
+    import base64 as _b64  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    credentials = f"{username}:{token}".encode()
+    auth_header = "Basic " + _b64.b64encode(credentials).decode()
+    req = urllib.request.Request(
+        "https://api.github.com/user",
+        headers={
+            "Authorization": auth_header,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "api-code-generator/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            login = _json.loads(resp.read().decode()).get("login", username)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:  # noqa: PLR2004
+            return jsonify({"ok": False, "error": "Invalid credentials — GitHub returned 401 Unauthorized."}), 401
+        return jsonify({"ok": False, "error": f"GitHub API error {exc.code}: {exc.reason}"}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    _GH_USERNAME = login
+    _GH_TOKEN    = token
+    return jsonify({"ok": True, "username": login})
+
+
 @app.post("/api/github/browse")
 def github_browse():
     """Browse files in the reference GitHub repository.

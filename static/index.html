@@ -259,6 +259,20 @@ code{font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:12
   <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
   <div style="display:flex;flex-direction:column;gap:10px;max-width:520px">
     <label style="font-size:12px;color:var(--muted)">Reference Repository (nable-nc/api-service)</label>
+
+    <!-- Credential inputs -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <input type="text" id="ghUsernameInput" placeholder="GitHub username"
+        style="flex:1;min-width:140px;max-width:200px">
+      <input type="password" id="ghTokenInput" placeholder="Personal access token (repo read)"
+        style="flex:2;min-width:200px">
+      <button class="btn" id="ghConnectBtn" onclick="ghConnect()" style="white-space:nowrap">
+        🔗 Connect
+      </button>
+    </div>
+    <p id="ghConnectMsg" style="font-size:11px;margin:0;display:none"></p>
+
+    <!-- Status row -->
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <span id="ghStatusBadge" style="font-size:12px;padding:3px 8px;border-radius:999px;background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.3)">
         ⚠ Not configured
@@ -269,9 +283,11 @@ code{font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:12
       </button>
     </div>
     <p style="font-size:11px;color:var(--dim);margin:0">
-      Set <code style="font-size:11px">GITHUB_USERNAME</code> and <code style="font-size:11px">GITHUB_TOKEN</code>
-      in your <code style="font-size:11px">.env</code> file (copy from <code style="font-size:11px">.env.example</code>)
-      to browse the private reference repository and copy patterns into your generated code.
+      Enter your GitHub username and a
+      <a href="https://github.com/settings/tokens" target="_blank" rel="noopener" style="color:var(--accent)">Personal Access Token</a>
+      (read-only <code style="font-size:11px">repo</code> scope) to browse the private reference repository.
+      You can also set <code style="font-size:11px">GITHUB_USERNAME</code> / <code style="font-size:11px">GITHUB_TOKEN</code>
+      in your <code style="font-size:11px">.env</code> file before starting the server.
     </p>
   </div>
 </div>
@@ -729,6 +745,43 @@ async function refreshGhStatus(){
       btn.title='Configure GitHub credentials to browse';
     }
   } catch(_){}
+}
+
+async function ghConnect(){
+  const username = document.getElementById('ghUsernameInput').value.trim();
+  const token    = document.getElementById('ghTokenInput').value.trim();
+  const msg      = document.getElementById('ghConnectMsg');
+  const btn      = document.getElementById('ghConnectBtn');
+  if(!token){
+    msg.style.display='';
+    msg.style.color='#fca5a5';
+    msg.textContent='⚠ Please enter a personal access token.';
+    return;
+  }
+  btn.disabled=true;
+  btn.textContent='Connecting…';
+  msg.style.display='none';
+  try{
+    const res = await post('/api/github/credentials',{username, token});
+    if(res.ok){
+      msg.style.display='';
+      msg.style.color='#6ee7b7';
+      msg.textContent=`✅ Connected as ${res.username}`;
+      document.getElementById('ghTokenInput').value='';
+      await refreshGhStatus();
+    } else {
+      msg.style.display='';
+      msg.style.color='#fca5a5';
+      msg.textContent='⚠ '+(res.error||'Connection failed.');
+    }
+  } catch(e){
+    msg.style.display='';
+    msg.style.color='#fca5a5';
+    msg.textContent='⚠ '+(e.message||'Connection failed.');
+  } finally {
+    btn.disabled=false;
+    btn.textContent='🔗 Connect';
+  }
 }
 
 async function openGhBrowser(){
