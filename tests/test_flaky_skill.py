@@ -3349,3 +3349,215 @@ class TestPromptFailingTestAndAffectedLine:
             robot_source_snippet="5 │ Verify Login\n6 │     Open Browser",
         )
         assert "line number" in prompt.lower() or "│" in prompt
+
+
+# ===========================================================================
+# Feature: robot_source_file shown in report header; code-snippet file guidance
+# ===========================================================================
+
+class TestRobotTestFileInHeader:
+    """robot_source_file filename appears in the Markdown report header."""
+
+    def _make_skill(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill()
+
+    def _minimal_issue(self):
+        return {
+            "key": "NCCF-1",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "comments": [],
+        }
+
+    def test_robot_test_file_shown_in_header_when_source_file_known(self):
+        """When robot_source_file is set the filename appears in the header."""
+        skill = self._make_skill()
+        report = skill._format_ticket_report(
+            self._minimal_issue(),
+            attachments=[],
+            robot_runs=[],
+            flaky_metrics=[],
+            root_cause="Timer drift.",
+            recommended_solution="Fix it.",
+            robot_source_file="tests/two_factor_authentication.robot",
+            failing_test_name="Two Factor Authentication",
+            use_ai=False,
+        )
+        assert "Robot Test File" in report
+        assert "two_factor_authentication.robot" in report
+
+    def test_robot_test_file_absent_from_header_when_not_set(self):
+        """When robot_source_file is empty the 'Robot Test File' row is omitted."""
+        skill = self._make_skill()
+        report = skill._format_ticket_report(
+            self._minimal_issue(),
+            attachments=[],
+            robot_runs=[],
+            flaky_metrics=[],
+            root_cause="Timer drift.",
+            recommended_solution="Fix it.",
+            robot_source_file="",
+            failing_test_name="Verify Login",
+            use_ai=False,
+        )
+        assert "Robot Test File" not in report
+
+    def test_only_basename_shown_not_full_path(self):
+        """Only the filename portion of the path is shown, not the full path."""
+        skill = self._make_skill()
+        report = skill._format_ticket_report(
+            self._minimal_issue(),
+            attachments=[],
+            robot_runs=[],
+            flaky_metrics=[],
+            root_cause="x",
+            recommended_solution="y",
+            robot_source_file="src/tests/suites/login.robot",
+            use_ai=False,
+        )
+        assert "login.robot" in report
+        assert "src/tests/suites/login.robot" not in report
+
+
+class TestCodeSnippetFileGuidance:
+    """'Where to apply this' guidance is added above the code snippet."""
+
+    def _make_skill(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill()
+
+    def _minimal_issue(self):
+        return {
+            "key": "NCCF-1", "summary": "Test", "status": "Open",
+            "description": "", "comments": [],
+        }
+
+    def _format(self, **kwargs):
+        skill = self._make_skill()
+        defaults = dict(
+            attachments=[], robot_runs=[], flaky_metrics=[],
+            root_cause="Root.", recommended_solution="Fix.", use_ai=False,
+        )
+        defaults.update(kwargs)
+        return skill._format_ticket_report(self._minimal_issue(), **defaults)
+
+    def test_python_snippet_with_source_file_shows_library_guidance(self):
+        """Python snippet + known source file → library/resource guidance mentioning the file."""
+        report = self._format(
+            code_snippet="```python\nimport time\nx = 1\n```",
+            robot_source_file="tests/two_factor_authentication.robot",
+            failing_test_name="Two Factor Authentication",
+        )
+        assert "Where to apply this" in report
+        assert "two_factor_authentication.robot" in report
+        assert "Library" in report or "library" in report
+
+    def test_robot_snippet_with_source_file_shows_direct_file_guidance(self):
+        """Robot snippet + known source file → direct 'apply in <file>' note."""
+        report = self._format(
+            code_snippet="```robot\nVerify Login\n    Open Browser\n```",
+            robot_source_file="tests/login.robot",
+            failing_test_name="Verify Login",
+        )
+        assert "Where to apply this" in report
+        assert "login.robot" in report
+        # Should NOT mention library imports for a .robot snippet
+        assert "Library" not in report
+
+    def test_python_snippet_without_source_file_infers_robot_filename(self):
+        """Python snippet + no source file → guidance using {failing_test_name}.robot."""
+        report = self._format(
+            code_snippet="```python\nx = 1\n```",
+            robot_source_file="",
+            failing_test_name="Two Factor Authentication",
+        )
+        assert "Where to apply this" in report
+        assert "Two Factor Authentication.robot" in report
+
+    def test_no_guidance_when_no_file_info(self):
+        """When neither robot_source_file nor failing_test_name is set, no guidance is added."""
+        report = self._format(
+            code_snippet="```python\nx = 1\n```",
+            robot_source_file="",
+            failing_test_name="",
+        )
+        # Section header is still present
+        assert "Corrected Code Snippet" in report
+        # But no "Where to apply this" noise
+        assert "Where to apply this" not in report
+
+    def test_na_snippet_produces_no_snippet_section(self):
+        """'N/A' snippet must not generate a Corrected Code Snippet section."""
+        report = self._format(
+            code_snippet="N/A",
+            robot_source_file="tests/login.robot",
+            failing_test_name="Verify Login",
+        )
+        assert "Corrected Code Snippet" not in report
+
+
+class TestHtmlRobotTestFileAndSnippetGuidance:
+    """HTML report shows Robot Test File in meta table and file guidance for snippets."""
+
+    def _make_report(self, robot_source_file="", failing_test_name="", code_snippet=""):
+        from skills.flaky_test_analysis import TicketAnalysisReport
+        return TicketAnalysisReport(
+            issue_key="NCCF-1",
+            summary="Test",
+            status="Open",
+            robot_source_file=robot_source_file,
+            failing_test_name=failing_test_name,
+            code_snippet=code_snippet,
+            formatted_report="",
+        )
+
+    def test_html_shows_robot_test_file_row_when_set(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            robot_source_file="tests/two_factor_authentication.robot"
+        )
+        html = render_html_report([report])
+        assert "Robot Test File" in html
+        assert "two_factor_authentication.robot" in html
+
+    def test_html_omits_robot_test_file_row_when_empty(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report()
+        html = render_html_report([report])
+        assert "Robot Test File" not in html
+
+    def test_html_python_snippet_with_source_file_shows_library_guidance(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            robot_source_file="tests/login.robot",
+            failing_test_name="Verify Login",
+            code_snippet="```python\nimport time\n```",
+        )
+        html = render_html_report([report])
+        assert "Where to apply this" in html
+        assert "login.robot" in html
+        assert "Library" in html or "library" in html
+
+    def test_html_robot_snippet_with_source_file_shows_direct_guidance(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            robot_source_file="tests/login.robot",
+            failing_test_name="Verify Login",
+            code_snippet="```robot\nVerify Login\n    Open Browser\n```",
+        )
+        html = render_html_report([report])
+        assert "Where to apply this" in html
+        assert "login.robot" in html
+
+    def test_html_python_snippet_infers_robot_file_from_test_name(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            robot_source_file="",
+            failing_test_name="Two Factor Authentication",
+            code_snippet="```python\nx = 1\n```",
+        )
+        html = render_html_report([report])
+        assert "Where to apply this" in html
+        assert "Two Factor Authentication.robot" in html

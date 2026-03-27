@@ -437,6 +437,7 @@ def markdown_wrap(md: str, title: str = "Flaky Test Analysis Report") -> str:
 def _render_ticket_card(r: "TicketAnalysisReport") -> str:
     """Render a single :class:`TicketAnalysisReport` as an HTML card."""
     failing_test = (getattr(r, "failing_test_name", "") or "").strip()
+    src_file = (getattr(r, "robot_source_file", "") or "").strip()
     lines: List[str] = [
         f'<div class="card" id="{_e(r.issue_key)}">',
         '<div class="card-header">',
@@ -453,6 +454,11 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
         lines.append(
             f"<tr><td><strong>Failing Test</strong></td>"
             f"<td><code>{_e(failing_test)}</code></td></tr>"
+        )
+    if src_file:
+        lines.append(
+            f"<tr><td><strong>Robot Test File</strong></td>"
+            f"<td><code>{_e(Path(src_file).name)}</code></td></tr>"
         )
     lines.append("</table>")
 
@@ -511,7 +517,6 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
 
     # failing test source from n-central
     src_snippet = (getattr(r, "robot_source_snippet", "") or "").strip()
-    src_file = (getattr(r, "robot_source_file", "") or "").strip()
     if src_snippet:
         lines += [
             "<h2>🤖 Failing Test Source</h2>",
@@ -554,7 +559,39 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
     if snippet and snippet.upper() not in ("N/A", "NONE"):
         lang_match = re.match(r"```([a-z]+)", snippet)
         lang = lang_match.group(1) if lang_match else "robot"
-        lines += ["<h2>💻 Corrected Code Snippet</h2>", _code_block(snippet, lang=lang)]
+        is_python = lang == "python"
+        lines.append("<h2>💻 Corrected Code Snippet</h2>")
+        if src_file:
+            src_filename = Path(src_file).name
+            if is_python:
+                guidance = (
+                    f"⚠️ <strong>Where to apply this:</strong> This is Python code for a library or "
+                    f"keyword implementation. Open <code>{_e(src_filename)}</code>, find the "
+                    f"<code>Library</code> or <code>Resource</code> imports, and apply the changes "
+                    f"to the referenced Python file."
+                )
+            else:
+                guidance = (
+                    f"📝 <strong>Where to apply this:</strong> Apply these changes in "
+                    f"<code>{_e(src_filename)}</code>."
+                )
+            lines.append(f"<p>{guidance}</p>")
+        elif failing_test:
+            inferred_file = f"{failing_test}.robot"
+            if is_python:
+                guidance = (
+                    f"⚠️ <strong>Where to apply this:</strong> This is Python code for a library or "
+                    f"keyword implementation. Open <code>{_e(inferred_file)}</code>, find the "
+                    f"<code>Library</code> or <code>Resource</code> imports, and apply the changes "
+                    f"to the referenced Python file."
+                )
+            else:
+                guidance = (
+                    f"📝 <strong>Where to apply this:</strong> Apply these changes in "
+                    f"<code>{_e(inferred_file)}</code>."
+                )
+            lines.append(f"<p>{guidance}</p>")
+        lines.append(_code_block(snippet, lang=lang))
 
     lines += ["</div>", "</div>"]  # close card-body / card
     return "\n".join(lines)

@@ -1586,6 +1586,8 @@ class FlakyTestAnalysisSkill:
         ]
         if failing_test_name:
             lines.append(f"**Failing Test:** `{failing_test_name}`  ")
+        if robot_source_file:
+            lines.append(f"**Robot Test File:** `{Path(robot_source_file).name}`  ")
         lines.append("")
 
         # Attachments inventory
@@ -1738,7 +1740,38 @@ class FlakyTestAnalysisSkill:
         # Code snippet (corrected version of the failing test)
         snippet = (code_snippet or "").strip()
         if snippet and snippet.upper() not in ("N/A", "NONE"):
-            lines += ["## 💻 Corrected Code Snippet", "", snippet, ""]
+            is_python = "```python" in snippet.lower()
+            if robot_source_file:
+                src_filename = Path(robot_source_file).name
+                if is_python:
+                    file_guidance = (
+                        f"> ⚠️ **Where to apply this:** This is Python code for a library or "
+                        f"keyword implementation. Open `{src_filename}`, find the `Library` or "
+                        f"`Resource` imports, and apply the changes to the referenced Python file."
+                    )
+                else:
+                    file_guidance = (
+                        f"> 📝 **Where to apply this:** Apply these changes in `{src_filename}`."
+                    )
+            elif failing_test_name:
+                inferred_file = f"{failing_test_name}.robot"
+                if is_python:
+                    file_guidance = (
+                        f"> ⚠️ **Where to apply this:** This is Python code for a library or "
+                        f"keyword implementation. Open `{inferred_file}`, find the `Library` or "
+                        f"`Resource` imports, and apply the changes to the referenced Python file."
+                    )
+                else:
+                    file_guidance = (
+                        f"> 📝 **Where to apply this:** Apply these changes in `{inferred_file}`."
+                    )
+            else:
+                file_guidance = ""
+            snippet_section: List[str] = ["## 💻 Corrected Code Snippet", ""]
+            if file_guidance:
+                snippet_section += [file_guidance, ""]
+            snippet_section += [snippet, ""]
+            lines += snippet_section
 
         lines += [
             "---",
