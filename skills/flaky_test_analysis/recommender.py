@@ -82,6 +82,38 @@ class Recommender:
         recommendations.sort(key=lambda r: r.severity_weight, reverse=True)
         return recommendations
 
+    def recommend_for_failed(
+        self,
+        test_name: str,
+        sample_results: List[TestResult],
+    ) -> List[Recommendation]:
+        """
+        Return pattern-based recommendations for *test_name* using only its
+        failed results, without requiring a flakiness score.
+
+        Use this when analysing a ticket that may have only a single test run
+        (where the usual flakiness classification is not applicable).
+        """
+        failed_results = [r for r in sample_results if r.status == "FAIL"]
+        if not failed_results:
+            return []
+
+        seen_pattern_ids: set[str] = set()
+        recommendations: List[Recommendation] = []
+
+        for result in failed_results:
+            matched = self._db.match(result)
+            for pattern in matched:
+                if pattern.id in seen_pattern_ids:
+                    continue
+                seen_pattern_ids.add(pattern.id)
+                recommendations.append(
+                    self._build_recommendation(test_name, result, pattern)
+                )
+
+        recommendations.sort(key=lambda r: r.severity_weight, reverse=True)
+        return recommendations
+
     def recommend_all(
         self,
         all_metrics: List[TestMetrics],

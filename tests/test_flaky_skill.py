@@ -270,6 +270,34 @@ class TestRecommender:
         pattern_ids = {r.pattern_id for r in timeout_recs}
         assert "datetime_timing" in pattern_ids
 
+    def test_recommend_for_failed_returns_recs_for_single_run_failed_test(self):
+        """recommend_for_failed matches patterns even when there is only 1 run (no flakiness)."""
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        parser = RobotOutputParser()
+        single_run = parser.parse_files([SAMPLE_RUN1])  # single run → all tests are "Stable"
+        # Collect the failed test results
+        failed_by_name = {}
+        for run in single_run:
+            for t in run.tests:
+                if t.status == "FAIL":
+                    failed_by_name.setdefault(t.name, []).append(t)
+
+        # The datetime failing test should still get a recommendation
+        timeout_results = failed_by_name.get("test_user_session_timeout", [])
+        recs = self.recommender.recommend_for_failed("test_user_session_timeout", timeout_results)
+        assert len(recs) > 0
+        pattern_ids = {r.pattern_id for r in recs}
+        assert "datetime_timing" in pattern_ids
+
+    def test_recommend_for_failed_returns_empty_for_passing_test(self):
+        """recommend_for_failed returns [] when all provided results are passing."""
+        from skills.flaky_test_analysis.robot_parser import RobotOutputParser
+        parser = RobotOutputParser()
+        single_run = parser.parse_files([SAMPLE_RUN1])
+        passing = [t for run in single_run for t in run.tests if t.status == "PASS"]
+        recs = self.recommender.recommend_for_failed("test_login_with_valid_credentials", passing)
+        assert recs == []
+
 
 # ===========================================================================
 # FlakyTestAnalysisSkill (integration, no AI)
@@ -768,6 +796,74 @@ class TestAnalyzeTicket:
         # Should mention --no-ai, not tell user to set ANTHROPIC_API_KEY
         assert "--no-ai" in report.formatted_report
         assert "Set `ANTHROPIC_API_KEY`" not in report.formatted_report
+
+    def test_analyze_ticket_pattern_matching_runs_on_single_run_failed_tests(self):
+        """Pattern matching runs on failed tests even with a single robot XML (no flakiness)."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "7",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/7/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # The single-run XML has tests failing with "datetime.now()" and "ConnectionError" etc.
+        assert len(report.recommendations) > 0
+        # The datetime_timing pattern should be found for the timing test
+        timeout_recs = report.recommendations.get("test_user_session_timeout", [])
+        assert any(r.pattern_id == "datetime_timing" for r in timeout_recs)
+
+    def test_analyze_ticket_report_shows_detected_patterns_section(self):
+        """The formatted report includes a 'Detected Patterns' section when patterns are found."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "8",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/8/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "Detected Patterns" in report.formatted_report
+
+    def test_analyze_ticket_no_ai_fallback_mentions_patterns_when_present(self):
+        """The --no-ai fallback message mentions 'detected patterns' when patterns were found."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        attachments = [
+            {
+                "id": "9",
+                "filename": "output.xml",
+                "mimeType": "application/xml",
+                "size": len(SAMPLE_OUTPUT_XML),
+                "content": "https://example.atlassian.net/secure/attachment/9/output.xml",
+            }
+        ]
+        mock_jira = _make_jira_mock(attachments=attachments)
+        mock_jira.download_attachment.return_value = SAMPLE_OUTPUT_XML
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        # When patterns are present the fallback should reference them
+        assert "detected patterns" in report.formatted_report
+
+    def test_analyze_ticket_no_ai_fallback_omits_patterns_when_none_found(self):
+        """The --no-ai fallback message does NOT mention patterns when none were matched."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        # Use a plain text attachment (no Robot XML) so no patterns can match
+        mock_jira = _make_jira_mock()  # no attachments → no robot runs → no patterns
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "detected patterns" not in report.formatted_report
 
     def test_is_zip_archive_detects_by_extension(self):
         from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill

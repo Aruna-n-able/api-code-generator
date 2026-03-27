@@ -152,6 +152,7 @@ class TicketAnalysisReport:
     attachments: List[AttachmentInfo] = field(default_factory=list)
     robot_runs: List[ParsedRun] = field(default_factory=list)
     flaky_metrics: List[TestMetrics] = field(default_factory=list)
+    recommendations: Dict[str, List[Recommendation]] = field(default_factory=dict)
     root_cause: str = ""
     recommended_solution: str = ""
     formatted_report: str = ""
@@ -491,12 +492,26 @@ class FlakyTestAnalysisSkill:
         # ----------------------------------------------------------------
         robot_runs: List[ParsedRun] = []
         flaky_metrics: List[TestMetrics] = []
+        ticket_recommendations: Dict[str, List[Recommendation]] = {}
         if robot_xml_paths:
             logger.info(
                 "Parsing %d Robot Framework output.xml file(s)…", len(robot_xml_paths)
             )
             robot_runs = self._parser.parse_files(robot_xml_paths)
             flaky_metrics = self._metrics_engine.compute(robot_runs)
+
+            # Run pattern matching on all failed tests (regardless of flakiness
+            # score so that single-run tickets still get recommendations).
+            logger.info("Matching flaky patterns and generating recommendations…")
+            all_failed: Dict[str, List[TestResult]] = {}
+            for run in robot_runs:
+                for t in run.tests:
+                    if t.status == "FAIL":
+                        all_failed.setdefault(t.name, []).append(t)
+            for test_name, failed_results in all_failed.items():
+                recs = self._recommender.recommend_for_failed(test_name, failed_results)
+                if recs:
+                    ticket_recommendations[test_name] = recs
 
         # ----------------------------------------------------------------
         # AI root-cause analysis
@@ -519,6 +534,7 @@ class FlakyTestAnalysisSkill:
             root_cause,
             recommended_solution,
             use_ai=use_ai,
+            recommendations=ticket_recommendations,
         )
 
         report = TicketAnalysisReport(
@@ -528,6 +544,7 @@ class FlakyTestAnalysisSkill:
             attachments=attachment_infos,
             robot_runs=robot_runs,
             flaky_metrics=flaky_metrics,
+            recommendations=ticket_recommendations,
             root_cause=root_cause,
             recommended_solution=recommended_solution,
             formatted_report=formatted,
@@ -890,7 +907,11 @@ class FlakyTestAnalysisSkill:
         root_cause: str,
         recommended_solution: str,
         use_ai: bool = True,
+        recommendations: Optional[Dict[str, List[Recommendation]]] = None,
     ) -> str:
+        if recommendations is None:
+            recommendations = {}
+
         lines: List[str] = [
             f"# Root Cause Analysis – {issue.get('key', 'N/A')}",
             "",
@@ -944,15 +965,35 @@ class FlakyTestAnalysisSkill:
                 )
             lines.append("")
 
+        # Pattern-based recommendations for failed tests
+        if recommendations:
+            lines += ["## Detected Patterns & Recommendations", ""]
+            for test_name, recs in recommendations.items():
+                lines += [f"### `{test_name}`", ""]
+                for rec in recs:
+                    lines += [
+                        f"#### {rec.pattern_name}",
+                        "",
+                        rec.description.strip(),
+                        "",
+                        rec.fix_template.strip(),
+                        "",
+                    ]
+
         # Root cause
         if root_cause:
             lines += ["## 🔍 Root Cause", "", root_cause, ""]
         elif not use_ai:
+            has_patterns = bool(recommendations)
+            suffix = (
+                "See Robot Framework test results and detected patterns above."
+                if has_patterns
+                else "See Robot Framework test results above."
+            )
             lines += [
                 "## 🔍 Root Cause",
                 "",
-                "_AI analysis skipped (`--no-ai`). "
-                "See Robot Framework test results and detected patterns above._",
+                f"_AI analysis skipped (`--no-ai`). {suffix}_",
                 "",
             ]
         else:
