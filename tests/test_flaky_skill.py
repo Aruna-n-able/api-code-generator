@@ -3761,3 +3761,239 @@ class TestHtmlSnippetGuidanceNamesLibraryFiles:
         html = render_html_report([report])
         assert "Where to apply this" in html
         assert "login.robot" in html
+
+
+# ===========================================================================
+# Feature: _find_test_line_in_snippet returns 1-based line number for test name
+# ===========================================================================
+
+class TestFindTestLineInSnippet:
+    """_find_test_line_in_snippet locates the line where a test name appears."""
+
+    def _find(self, test_name, snippet):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill._find_test_line_in_snippet(test_name, snippet)
+
+    def test_finds_test_name_at_correct_line(self):
+        snippet = (
+            "38 │ *** Test Cases ***\n"
+            "39 │ Verify Login\n"
+            "40 │     Open Browser    ${URL}    Chrome\n"
+        )
+        assert self._find("Verify Login", snippet) == 39
+
+    def test_finds_test_name_with_wide_line_number(self):
+        snippet = (
+            " 99 │ *** Test Cases ***\n"
+            "100 │ Verify Long Running Test\n"
+            "101 │     Sleep    10s\n"
+        )
+        assert self._find("Verify Long Running Test", snippet) == 100
+
+    def test_normalises_internal_whitespace(self):
+        """Multiple spaces in test name (e.g. from copy-paste) should still match."""
+        snippet = (
+            "39 │ Verify  System  Warranty  Service\n"
+        )
+        # The comparison normalises both sides
+        assert self._find("Verify  System  Warranty  Service", snippet) == 39
+
+    def test_returns_none_when_not_found(self):
+        snippet = (
+            "39 │ Verify Login\n"
+            "40 │     Open Browser\n"
+        )
+        assert self._find("Verify Logout", snippet) is None
+
+    def test_returns_none_for_empty_snippet(self):
+        assert self._find("Verify Login", "") is None
+
+    def test_ignores_indented_lines(self):
+        """Keyword calls (indented) must not be mistaken for a test name."""
+        snippet = (
+            "39 │ Verify Login\n"
+            "40 │     Verify Login Step\n"  # indented – different normalised form
+        )
+        assert self._find("Verify Login", snippet) == 39
+
+    def test_real_world_cmmc_snippet(self):
+        """Simulates the exact snippet from the problem statement."""
+        snippet = (
+            "39 │ Verify System Warranty Service Is Not Added When CMMC mode Is Enabled After Update Asset Info\n"
+            "40 │     [Documentation]    Login As Productadmin user.\n"
+            "41 │     ...    Update computer system data.\n"
+            "42 │     [Tags]    NCCF-566070\n"
+            "43 │     Update Asset Info & Verify Service Is Not Present\n"
+        )
+        result = self._find(
+            "Verify System Warranty Service Is Not Added When CMMC mode Is Enabled After Update Asset Info",
+            snippet,
+        )
+        assert result == 39
+
+
+# ===========================================================================
+# Feature: Recommendations section shows File + Line annotation (Markdown)
+# ===========================================================================
+
+class TestRecommendationsFileLineAnnotation:
+    """_format_ticket_report includes file+line annotation in recommendations."""
+
+    def _make_skill(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill()
+
+    def _minimal_issue(self):
+        return {
+            "key": "NCCF-1", "summary": "Test", "status": "Open",
+            "description": "", "comments": [],
+        }
+
+    def _make_rec(self, test_name="Verify Login"):
+        from skills.flaky_test_analysis.recommender import Recommendation
+        return Recommendation(
+            test_name=test_name,
+            pattern_id="ui_element_not_found",
+            pattern_name="UI Element Not Found / Browser Timing",
+            description="Element not found after retrying.",
+            fix_template="Wait Until Page Contains Element    ${locator}",
+            severity_weight=3,
+        )
+
+    def _format(self, **kwargs):
+        skill = self._make_skill()
+        defaults = dict(
+            attachments=[], robot_runs=[], flaky_metrics=[],
+            root_cause="Root.", recommended_solution="Fix.", use_ai=False,
+        )
+        defaults.update(kwargs)
+        return skill._format_ticket_report(self._minimal_issue(), **defaults)
+
+    def test_shows_file_and_line_in_recommendation_when_snippet_has_test_name(self):
+        snippet = (
+            "38 │ *** Test Cases ***\n"
+            "39 │ Verify Login\n"
+            "40 │     Open Browser    ${URL}\n"
+        )
+        report = self._format(
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=snippet,
+            recommendations={"Verify Login": [self._make_rec("Verify Login")]},
+        )
+        assert "login.robot" in report
+        assert "Line:** 39" in report or "Line: 39" in report or "· **Line:** 39" in report
+
+    def test_shows_only_filename_when_line_not_found_in_snippet(self):
+        """If the test name is not in the snippet, show filename only (no line)."""
+        snippet = "38 │ *** Test Cases ***\n39 │ Other Test\n"
+        report = self._format(
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=snippet,
+            recommendations={"Verify Login": [self._make_rec("Verify Login")]},
+        )
+        assert "login.robot" in report
+        # No "Line:" annotation when the test was not found
+        assert "Line:** 39" not in report
+
+    def test_omits_annotation_when_no_robot_source_file(self):
+        """No annotation at all when robot_source_file is empty."""
+        snippet = "39 │ Verify Login\n"
+        report = self._format(
+            robot_source_file="",
+            robot_source_snippet=snippet,
+            recommendations={"Verify Login": [self._make_rec("Verify Login")]},
+        )
+        assert "📍" not in report
+
+    def test_cmmc_realistic_scenario(self):
+        """Mirrors the exact CMMC_Lookup_Warranty report from the problem statement."""
+        test_name = (
+            "Verify System Warranty Service Is Not Added When CMMC mode Is "
+            "Enabled After Update Asset Info"
+        )
+        snippet = (
+            "39 │ Verify System Warranty Service Is Not Added When CMMC mode Is "
+            "Enabled After Update Asset Info\n"
+            "40 │     [Documentation]    Login As Productadmin user.\n"
+        )
+        report = self._format(
+            robot_source_file="test/robot/n-central/CMMC_Lookup_Warranty.robot",
+            robot_source_snippet=snippet,
+            recommendations={test_name: [self._make_rec(test_name)]},
+        )
+        assert "CMMC_Lookup_Warranty.robot" in report
+        assert "39" in report  # line number present
+
+
+# ===========================================================================
+# Feature: Recommendations section shows File + Line annotation (HTML)
+# ===========================================================================
+
+class TestHtmlRecommendationsFileLineAnnotation:
+    """HTML report _render_ticket_card includes file+line annotation in recommendations."""
+
+    def _make_rec(self, test_name="Verify Login"):
+        from skills.flaky_test_analysis.recommender import Recommendation
+        return Recommendation(
+            test_name=test_name,
+            pattern_id="timing",
+            pattern_name="Browser Timing",
+            description="Element missing due to timing.",
+            fix_template="Wait Until Page Contains Element    ${loc}",
+            severity_weight=2,
+        )
+
+    def _make_report(self, robot_source_file="", robot_source_snippet="",
+                     recommendations=None):
+        from skills.flaky_test_analysis import TicketAnalysisReport
+        return TicketAnalysisReport(
+            issue_key="NCCF-1",
+            summary="Test",
+            status="Open",
+            robot_source_file=robot_source_file,
+            robot_source_snippet=robot_source_snippet,
+            recommendations=recommendations or {},
+            formatted_report="",
+        )
+
+    def test_html_shows_file_and_line_in_recommendation(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        snippet = (
+            "38 │ *** Test Cases ***\n"
+            "39 │ Verify Login\n"
+            "40 │     Open Browser\n"
+        )
+        report = self._make_report(
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=snippet,
+            recommendations={"Verify Login": [self._make_rec("Verify Login")]},
+        )
+        html = render_html_report([report])
+        assert "login.robot" in html
+        assert "39" in html
+        assert "📍" in html
+
+    def test_html_shows_only_filename_when_line_not_found(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        snippet = "38 │ *** Test Cases ***\n39 │ Other Test\n"
+        report = self._make_report(
+            robot_source_file="tests/login.robot",
+            robot_source_snippet=snippet,
+            recommendations={"Verify Login": [self._make_rec("Verify Login")]},
+        )
+        html = render_html_report([report])
+        assert "login.robot" in html
+        assert "📍" in html
+        # Middot only appears when line number IS shown
+        assert "&middot;" not in html
+
+    def test_html_omits_annotation_when_no_robot_source_file(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        snippet = "39 │ Verify Login\n"
+        report = self._make_report(
+            robot_source_file="",
+            robot_source_snippet=snippet,
+            recommendations={"Verify Login": [self._make_rec("Verify Login")]},
+        )
+        html = render_html_report([report])
+        assert "📍" not in html

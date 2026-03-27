@@ -1585,6 +1585,33 @@ class FlakyTestAnalysisSkill:
                     found.append(basename)
         return found
 
+    @staticmethod
+    def _find_test_line_in_snippet(test_name: str, snippet: str) -> Optional[int]:
+        """Return the 1-based file line number where *test_name* appears in *snippet*.
+
+        The snippet uses the ``N │ content`` format produced by the GitHub
+        fetcher.  The line-number prefix can have arbitrary leading/trailing
+        whitespace (e.g. ``"  39 │ Verify Login"`` or ``"100 │ Verify Login"``).
+        The regex ``r"^\\s*(\\d+)\\s*│\\s*(.*)"`` handles all variants.
+        The comparison normalises internal whitespace on both sides so that
+        Robot Framework's space-insensitive naming is respected.
+
+        Returns ``None`` when the test name is not found or the snippet is
+        empty.
+        """
+        import re as _re
+
+        normalised_target = " ".join(test_name.split())
+        for raw_line in snippet.splitlines():
+            m = _re.match(r"^\s*(\d+)\s*│\s*(.*)", raw_line)
+            if not m:
+                continue
+            line_no = int(m.group(1))
+            content = " ".join(m.group(2).split())
+            if content == normalised_target:
+                return line_no
+        return None
+
     # ------------------------------------------------------------------
     # Ticket report formatting
     # ------------------------------------------------------------------
@@ -1701,8 +1728,22 @@ class FlakyTestAnalysisSkill:
         # Pattern-based recommendations for failed tests
         if recommendations:
             lines += ["## Detected Patterns & Recommendations", ""]
+            src_basename = Path(robot_source_file).name if robot_source_file else ""
             for test_name, recs in recommendations.items():
                 lines += [f"### `{test_name}`", ""]
+                # Annotate with robot file + line number so readers know exactly
+                # which file and line the recommendation applies to.
+                if src_basename:
+                    test_line = self._find_test_line_in_snippet(
+                        test_name, robot_source_snippet
+                    )
+                    if test_line is not None:
+                        location = (
+                            f"> 📍 **File:** `{src_basename}` · **Line:** {test_line}"
+                        )
+                    else:
+                        location = f"> 📍 **File:** `{src_basename}`"
+                    lines += [location, ""]
                 for rec in recs:
                     lines += [
                         f"#### {rec.pattern_name}",

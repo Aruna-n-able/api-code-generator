@@ -526,9 +526,28 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
 
     # pattern-based recommendations
     if r.recommendations:
+        from .skill import FlakyTestAnalysisSkill as _Skill
+        src_snippet_for_recs = (getattr(r, "robot_source_snippet", "") or "").strip()
+        src_basename_for_recs = Path(src_file).name if src_file else ""
         lines.append("<h2>💡 Detected Patterns &amp; Recommendations</h2>")
         for test_name, recs in r.recommendations.items():
             lines.append(f"<h3><code>{_e(test_name)}</code></h3>")
+            if src_basename_for_recs:
+                test_line = _Skill._find_test_line_in_snippet(
+                    test_name, src_snippet_for_recs
+                )
+                if test_line is not None:
+                    loc_text = (
+                        f"📍 <strong>File:</strong> "
+                        f"<code>{_e(src_basename_for_recs)}</code>"
+                        f" &middot; <strong>Line:</strong> {test_line}"
+                    )
+                else:
+                    loc_text = (
+                        f"📍 <strong>File:</strong> "
+                        f"<code>{_e(src_basename_for_recs)}</code>"
+                    )
+                lines.append(f"<p>{loc_text}</p>")
             for rec in recs:
                 lines += [
                     f"<h4>{_e(rec.pattern_name)}</h4>",
