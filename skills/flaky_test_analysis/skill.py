@@ -334,6 +334,8 @@ class TicketAnalysisReport:
     code_snippet: str = ""
     robot_source_file: str = ""
     robot_source_snippet: str = ""
+    failing_test_name: str = ""
+    affected_line: str = ""
     formatted_report: str = ""
 
 
@@ -855,6 +857,7 @@ class FlakyTestAnalysisSkill:
         # ----------------------------------------------------------------
         robot_source_file = ""
         robot_source_snippet = ""
+        failing_test_name = next(iter(all_failed), "")  # first failing test name (if any)
         if all_failed:
             logger.info(
                 "Searching n-central repository for failing test source…"
@@ -872,28 +875,32 @@ class FlakyTestAnalysisSkill:
         # ----------------------------------------------------------------
         root_cause = ""
         recommended_solution = ""
+        affected_line = ""
         code_snippet = ""
         ai_error_hint = ""
         if use_ai:
             if self._api_key and _ANTHROPIC_AVAILABLE:
-                root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis(
+                root_cause, recommended_solution, affected_line, code_snippet, ai_error_hint = self._generate_root_cause_analysis(
                     issue, attachment_infos, robot_runs, flaky_metrics,
                     robot_source_file=robot_source_file,
                     robot_source_snippet=robot_source_snippet,
+                    failing_test_name=failing_test_name,
                 )
             if not root_cause and self._openai_api_key and _OPENAI_AVAILABLE:
                 # Use OpenAI if Anthropic is not configured or failed
-                root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis_openai(
+                root_cause, recommended_solution, affected_line, code_snippet, ai_error_hint = self._generate_root_cause_analysis_openai(
                     issue, attachment_infos, robot_runs, flaky_metrics,
                     robot_source_file=robot_source_file,
                     robot_source_snippet=robot_source_snippet,
+                    failing_test_name=failing_test_name,
                 )
             if not root_cause and self._groq_api_key and _OPENAI_AVAILABLE:
                 # Use Groq (free tier) as the last-resort fallback
-                root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis_groq(
+                root_cause, recommended_solution, affected_line, code_snippet, ai_error_hint = self._generate_root_cause_analysis_groq(
                     issue, attachment_infos, robot_runs, flaky_metrics,
                     robot_source_file=robot_source_file,
                     robot_source_snippet=robot_source_snippet,
+                    failing_test_name=failing_test_name,
                 )
 
         # ----------------------------------------------------------------
@@ -910,6 +917,8 @@ class FlakyTestAnalysisSkill:
             code_snippet,
             robot_source_file=robot_source_file,
             robot_source_snippet=robot_source_snippet,
+            failing_test_name=failing_test_name,
+            affected_line=affected_line,
             use_ai=use_ai and not ai_error_hint,
             recommendations=ticket_recommendations,
             ai_key_set=any_ai_key_set,
@@ -929,6 +938,8 @@ class FlakyTestAnalysisSkill:
             code_snippet=code_snippet,
             robot_source_file=robot_source_file,
             robot_source_snippet=robot_source_snippet,
+            failing_test_name=failing_test_name,
+            affected_line=affected_line,
             formatted_report=formatted,
         )
 
@@ -1143,17 +1154,18 @@ class FlakyTestAnalysisSkill:
         flaky_metrics: List[TestMetrics],
         robot_source_file: str = "",
         robot_source_snippet: str = "",
+        failing_test_name: str = "",
     ) -> str:
         """Build the prompt used by both AI providers for root-cause analysis."""
         has_source = bool(robot_source_snippet)
 
         if has_source:
             snippet_instruction = (
-                "  **Code Snippet:** (provide the *corrected* version of the "
-                "failing Robot Framework test shown in the 'Failing Test Source' "
-                "section below, using a ```robot fenced code block; apply only the "
-                "minimal changes needed to fix the root cause; write \"N/A\" if no "
-                "code change is required)"
+                "  **Code Snippet:** (the *corrected* version of the failing Robot "
+                "Framework test shown in the 'Failing Test Source' section below; "
+                "apply only the minimal changes needed to fix the root cause; "
+                "use a ```robot fenced code block; write \"N/A\" if no code "
+                "change is required)"
             )
         else:
             snippet_instruction = (
@@ -1163,21 +1175,43 @@ class FlakyTestAnalysisSkill:
                 "change is needed)"
             )
 
+        test_name_line = (
+            f"  **Failing Test:** `{failing_test_name}`" if failing_test_name else ""
+        )
+        affected_line_instruction = (
+            "  **Affected Line:** (the single line number and keyword from the "
+            "failing test that needs to be changed; format exactly as: "
+            "`<line_number> │ <keyword or step>` — <one-sentence reason>)"
+        )
+
         prompt_lines = [
             "",
+            "You are a concise technical reporter for a QA automation team.",
             "A Jenkins build has failed and a Jira ticket has been created automatically.",
-            "Your task is to:",
-            "  1. Identify the **root cause** of the failure.",
-            "  2. Provide a clear, actionable **recommended solution**.",
-            "  3. Provide a **code snippet** implementing the fix.",
             "",
-            "Respond with exactly three clearly labelled sections using the formats below:",
-            "  **Root Cause:** (3–5 bullet points, each on its own line starting with '- ', "
-            "describing what went wrong and why)",
+            "IMPORTANT: Output ONLY the four labelled sections below.",
+            "Do NOT include reasoning steps, chain-of-thought, 'Step N:' headers,",
+            "or any other text outside the four sections.",
+            "",
+            "Your task is to produce exactly these four sections:",
+            "  **Root Cause:** (3–5 bullet points, each on its own line starting "
+            "with '- ', describing what went wrong and why)",
             "  **Recommended Solution:** (numbered action steps, each on its own line "
             "starting with '1. ', '2. ', etc.)",
+            affected_line_instruction,
             snippet_instruction,
             "",
+        ]
+
+        if test_name_line:
+            prompt_lines += [
+                "## Failing Test",
+                "",
+                test_name_line,
+                "",
+            ]
+
+        prompt_lines += [
             "## Jira Ticket",
             "",
             f"**Key:** {issue.get('key', 'N/A')}",
@@ -1238,13 +1272,15 @@ class FlakyTestAnalysisSkill:
             prompt_lines += [
                 "## Failing Test Source",
                 f"*(fetched from `{robot_source_file}` in the n-central repository)*",
+                "*(each line is prefixed with its file line number so you can reference exact lines)*",
                 "",
                 "```robot",
                 robot_source_snippet,
                 "```",
                 "",
-                "Use the test source above to understand the exact steps being executed "
-                "and produce a corrected version in the 'Code Snippet' section.",
+                "Use the test source above to identify the exact line that needs "
+                "fixing (for **Affected Line:**) and produce a corrected version "
+                "in the **Code Snippet:** section.",
                 "",
             ]
 
@@ -1270,25 +1306,32 @@ class FlakyTestAnalysisSkill:
         flaky_metrics: List[TestMetrics],
         robot_source_file: str = "",
         robot_source_snippet: str = "",
-    ) -> Tuple[str, str, str, str]:
+        failing_test_name: str = "",
+    ) -> Tuple[str, str, str, str, str]:
         """
         Ask Claude to identify the root cause and recommend a fix.
 
-        Returns a tuple of (root_cause, recommended_solution, code_snippet, error_hint) strings.
-        error_hint is non-empty only when the API call failed; it is a short,
-        user-facing description of what went wrong.
+        Returns a tuple of
+        ``(root_cause, recommended_solution, affected_line, code_snippet, error_hint)``
+        strings.  ``error_hint`` is non-empty only when the API call failed.
         """
         if not _ANTHROPIC_AVAILABLE:
             logger.warning(
                 "anthropic package not installed; skipping AI analysis. "
                 "Install with: pip install anthropic"
             )
-            return "", "", "", ""
+            return "", "", "", "", ""
 
         prompt = self._build_root_cause_prompt(
             issue, attachments, robot_runs, flaky_metrics,
             robot_source_file=robot_source_file,
             robot_source_snippet=robot_source_snippet,
+            failing_test_name=failing_test_name,
+        )
+        system_msg = (
+            "You are a concise QA technical reporter. "
+            "Output ONLY the four labelled sections requested. "
+            "No reasoning steps, no chain-of-thought, no 'Step N:' headers."
         )
 
         try:
@@ -1296,17 +1339,17 @@ class FlakyTestAnalysisSkill:
             message = client.messages.create(
                 model=self._model,
                 max_tokens=2048,
+                system=system_msg,
                 messages=[{"role": "user", "content": prompt}],
             )
 
             full_response = message.content[0].text if message.content else ""
         except Exception as exc:
             error_hint = _handle_anthropic_error(exc)
-            return "", "", "", error_hint
+            return "", "", "", "", error_hint
 
-        # Split the response into root cause / solution / code snippet sections
-        root_cause, recommended_solution, code_snippet = self._parse_ai_response(full_response)
-        return root_cause, recommended_solution, code_snippet, ""
+        root_cause, recommended_solution, affected_line, code_snippet = self._parse_ai_response(full_response)
+        return root_cause, recommended_solution, affected_line, code_snippet, ""
 
     def _generate_root_cause_analysis_openai(
         self,
@@ -1316,25 +1359,32 @@ class FlakyTestAnalysisSkill:
         flaky_metrics: List[TestMetrics],
         robot_source_file: str = "",
         robot_source_snippet: str = "",
-    ) -> Tuple[str, str, str, str]:
+        failing_test_name: str = "",
+    ) -> Tuple[str, str, str, str, str]:
         """
         Ask OpenAI to identify the root cause and recommend a fix.
 
-        Returns a tuple of (root_cause, recommended_solution, code_snippet, error_hint) strings.
-        error_hint is non-empty only when the API call failed; it is a short,
-        user-facing description of what went wrong.
+        Returns a tuple of
+        ``(root_cause, recommended_solution, affected_line, code_snippet, error_hint)``
+        strings.  ``error_hint`` is non-empty only when the API call failed.
         """
         if not _OPENAI_AVAILABLE:
             logger.warning(
                 "openai package not installed; skipping AI analysis. "
                 "Install with: pip install openai"
             )
-            return "", "", "", ""
+            return "", "", "", "", ""
 
         prompt = self._build_root_cause_prompt(
             issue, attachments, robot_runs, flaky_metrics,
             robot_source_file=robot_source_file,
             robot_source_snippet=robot_source_snippet,
+            failing_test_name=failing_test_name,
+        )
+        system_msg = (
+            "You are a concise QA technical reporter. "
+            "Output ONLY the four labelled sections requested. "
+            "No reasoning steps, no chain-of-thought, no 'Step N:' headers."
         )
 
         client = self._create_openai_client()
@@ -1344,7 +1394,10 @@ class FlakyTestAnalysisSkill:
                 response = client.chat.completions.create(
                     model=model,
                     max_tokens=2048,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt},
+                    ],
                 )
                 if model != self._openai_model:
                     logger.info(
@@ -1355,8 +1408,8 @@ class FlakyTestAnalysisSkill:
                     if response.choices
                     else ""
                 )
-                root_cause, recommended_solution, code_snippet = self._parse_ai_response(full_response)
-                return root_cause, recommended_solution, code_snippet, ""
+                root_cause, recommended_solution, affected_line, code_snippet = self._parse_ai_response(full_response)
+                return root_cause, recommended_solution, affected_line, code_snippet, ""
             except Exception as exc:
                 if _is_openai_model_not_found(exc) and model != models_to_try[-1]:
                     logger.warning(
@@ -1364,7 +1417,7 @@ class FlakyTestAnalysisSkill:
                     )
                     continue
                 error_hint = _handle_openai_error(exc)
-                return "", "", "", error_hint
+                return "", "", "", "", error_hint
 
     def _generate_root_cause_analysis_groq(
         self,
@@ -1374,7 +1427,8 @@ class FlakyTestAnalysisSkill:
         flaky_metrics: List[TestMetrics],
         robot_source_file: str = "",
         robot_source_snippet: str = "",
-    ) -> Tuple[str, str, str, str]:
+        failing_test_name: str = "",
+    ) -> Tuple[str, str, str, str, str]:
         """
         Ask Groq (free LLM tier) to identify the root cause and recommend a fix.
 
@@ -1382,20 +1436,27 @@ class FlakyTestAnalysisSkill:
         Llama 3.3 70B.  It is used as the last-resort AI fallback when both
         Anthropic and OpenAI are unavailable or have exceeded their quotas.
 
-        Returns a tuple of (root_cause, recommended_solution, code_snippet, error_hint).
-        error_hint is non-empty only when the API call failed.
+        Returns a tuple of
+        ``(root_cause, recommended_solution, affected_line, code_snippet, error_hint)``.
+        ``error_hint`` is non-empty only when the API call failed.
         """
         if not _OPENAI_AVAILABLE:
             logger.warning(
                 "openai package not installed; Groq integration requires it. "
                 "Install with: pip install openai"
             )
-            return "", "", "", ""
+            return "", "", "", "", ""
 
         prompt = self._build_root_cause_prompt(
             issue, attachments, robot_runs, flaky_metrics,
             robot_source_file=robot_source_file,
             robot_source_snippet=robot_source_snippet,
+            failing_test_name=failing_test_name,
+        )
+        system_msg = (
+            "You are a concise QA technical reporter. "
+            "Output ONLY the four labelled sections requested. "
+            "No reasoning steps, no chain-of-thought, no 'Step N:' headers."
         )
 
         client = self._create_groq_client()
@@ -1405,7 +1466,10 @@ class FlakyTestAnalysisSkill:
                 response = client.chat.completions.create(
                     model=model,
                     max_tokens=2048,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt},
+                    ],
                 )
                 if model != self._groq_model:
                     logger.info(
@@ -1416,8 +1480,8 @@ class FlakyTestAnalysisSkill:
                     if response.choices
                     else ""
                 )
-                root_cause, recommended_solution, code_snippet = self._parse_ai_response(full_response)
-                return root_cause, recommended_solution, code_snippet, ""
+                root_cause, recommended_solution, affected_line, code_snippet = self._parse_ai_response(full_response)
+                return root_cause, recommended_solution, affected_line, code_snippet, ""
             except Exception as exc:
                 if (
                     (getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc))
@@ -1428,31 +1492,38 @@ class FlakyTestAnalysisSkill:
                     )
                     continue
                 error_hint = _handle_groq_error(exc)
-                return "", "", "", error_hint
+                return "", "", "", "", error_hint
 
     @staticmethod
-    def _parse_ai_response(response: str) -> Tuple[str, str, str]:
-        """Extract root cause, recommended solution, and code snippet from the AI response.
+    def _parse_ai_response(response: str) -> Tuple[str, str, str, str]:
+        """Extract root cause, recommended solution, affected line, and code snippet.
 
-        Returns a ``(root_cause, recommended_solution, code_snippet)`` 3-tuple.
-        ``code_snippet`` is the empty string when the AI returned "N/A" or did not
-        include a ``Code Snippet:`` section.
+        Returns a ``(root_cause, recommended_solution, affected_line, code_snippet)``
+        4-tuple.  Any field is the empty string when the corresponding labelled
+        section was absent or contained "N/A" / "NONE".
         """
         root_cause = ""
         recommended_solution = ""
+        affected_line = ""
         code_snippet = ""
 
-        # Look for the three labelled sections (case-insensitive)
+        # Look for the four labelled sections (case-insensitive)
         import re
 
         rc_match = re.search(
             r"\*{0,2}Root Cause:?\*{0,2}\s*(.*?)"
-            r"(?=\*{0,2}Recommended Solution:?|\*{0,2}Code Snippet:?|\Z)",
+            r"(?=\*{0,2}Recommended Solution:?|\*{0,2}Affected Line:?|\*{0,2}Code Snippet:?|\Z)",
             response,
             re.IGNORECASE | re.DOTALL,
         )
         sol_match = re.search(
             r"\*{0,2}Recommended Solution:?\*{0,2}\s*(.*?)"
+            r"(?=\*{0,2}Affected Line:?|\*{0,2}Code Snippet:?|\Z)",
+            response,
+            re.IGNORECASE | re.DOTALL,
+        )
+        al_match = re.search(
+            r"\*{0,2}Affected Line:?\*{0,2}\s*(.*?)"
             r"(?=\*{0,2}Code Snippet:?|\Z)",
             response,
             re.IGNORECASE | re.DOTALL,
@@ -1467,6 +1538,10 @@ class FlakyTestAnalysisSkill:
             root_cause = rc_match.group(1).strip()
         if sol_match:
             recommended_solution = sol_match.group(1).strip()
+        if al_match:
+            al_text = al_match.group(1).strip()
+            if al_text.upper() not in ("N/A", "NONE", ""):
+                affected_line = al_text
         if snippet_match:
             snippet_text = snippet_match.group(1).strip()
             if snippet_text.upper() not in ("N/A", "NONE", ""):
@@ -1476,7 +1551,7 @@ class FlakyTestAnalysisSkill:
         if not root_cause and not recommended_solution:
             root_cause = response.strip()
 
-        return root_cause, recommended_solution, code_snippet
+        return root_cause, recommended_solution, affected_line, code_snippet
 
     # ------------------------------------------------------------------
     # Ticket report formatting
@@ -1493,6 +1568,8 @@ class FlakyTestAnalysisSkill:
         code_snippet: str = "",
         robot_source_file: str = "",
         robot_source_snippet: str = "",
+        failing_test_name: str = "",
+        affected_line: str = "",
         use_ai: bool = True,
         recommendations: Optional[Dict[str, List[Recommendation]]] = None,
         ai_key_set: bool = False,
@@ -1507,8 +1584,10 @@ class FlakyTestAnalysisSkill:
             f"**Summary:** {issue.get('summary', '')}  ",
             f"**Status:** {issue.get('status', '')}  ",
             f"**Attachments analysed:** {len(attachments)}  ",
-            "",
         ]
+        if failing_test_name:
+            lines.append(f"**Failing Test:** `{failing_test_name}`  ")
+        lines.append("")
 
         # Attachments inventory
         if attachments:
@@ -1646,16 +1725,21 @@ class FlakyTestAnalysisSkill:
                     "",
                 ]
 
+        # Affected line (AI-identified line that needs fixing)
+        al = (affected_line or "").strip()
+        if al and al.upper() not in ("N/A", "NONE"):
+            lines += ["## 📍 Affected Line", "", al, ""]
+
         # Recommended solution
         if recommended_solution:
             lines += ["## ✅ Recommended Solution", "", recommended_solution, ""]
         elif root_cause:
             lines += ["## ✅ Recommended Solution", "", "_See root cause above._", ""]
 
-        # Code snippet
+        # Code snippet (corrected version of the failing test)
         snippet = (code_snippet or "").strip()
         if snippet and snippet.upper() not in ("N/A", "NONE"):
-            lines += ["## 💻 Code Snippet", "", snippet, ""]
+            lines += ["## 💻 Corrected Code Snippet", "", snippet, ""]
 
         lines += [
             "---",

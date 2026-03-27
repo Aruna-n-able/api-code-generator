@@ -745,14 +745,14 @@ class TestAnalyzeTicket:
             "**Root Cause:** The test relies on a real system clock.\n\n"
             "**Recommended Solution:** Use freezegun to freeze time in tests."
         )
-        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        rc, sol, al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
         assert "real system clock" in rc
         assert "freezegun" in sol
 
     def test_parse_ai_response_fallback_when_no_labels(self):
         from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
         response = "The test is broken because of a timing issue."
-        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        rc, sol, al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
         # Fallback: everything goes into root_cause
         assert "timing issue" in rc
         assert sol == ""
@@ -1172,7 +1172,7 @@ class TestAnthropicErrorHandling:
             )
 
         assert result[:2] == ("", "")
-        root_cause, recommended_solution, code_snippet, error_hint = result
+        root_cause, recommended_solution, affected_line, code_snippet, error_hint = result
         assert error_hint  # billing error hint must be non-empty
 
     def test_auth_error_returns_empty_string(self, caplog):
@@ -1198,7 +1198,7 @@ class TestAnthropicErrorHandling:
             )
 
         assert result[:2] == ("", "")
-        root_cause, recommended_solution, code_snippet, error_hint = result
+        root_cause, recommended_solution, affected_line, code_snippet, error_hint = result
         assert error_hint  # auth error hint must be non-empty
 
     def test_connection_error_returns_empty_tuple(self, caplog):
@@ -1223,7 +1223,7 @@ class TestAnthropicErrorHandling:
             )
 
         assert result[:2] == ("", "")
-        root_cause, recommended_solution, code_snippet, error_hint = result
+        root_cause, recommended_solution, affected_line, code_snippet, error_hint = result
         assert error_hint  # connection error hint must be non-empty
 
     def test_ai_not_called_when_anthropic_unavailable(self):
@@ -1349,7 +1349,7 @@ class TestOpenAISupport:
 
         with patch.object(skill_module, "_openai", fake_openai, create=True), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True):
-            rc, sol, snippet, err = skill._generate_root_cause_analysis_openai(
+            rc, sol, al, snippet, err = skill._generate_root_cause_analysis_openai(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1376,7 +1376,7 @@ class TestOpenAISupport:
 
         with patch.object(skill_module, "_openai", fake_openai, create=True), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True):
-            rc, sol, snippet, err = skill._generate_root_cause_analysis_openai(
+            rc, sol, al, snippet, err = skill._generate_root_cause_analysis_openai(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1408,7 +1408,7 @@ class TestOpenAISupport:
 
         with patch.object(skill_module, "_openai", fake_openai, create=True), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True):
-            rc, sol, snippet, err = skill._generate_root_cause_analysis_openai(
+            rc, sol, al, snippet, err = skill._generate_root_cause_analysis_openai(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1424,7 +1424,7 @@ class TestOpenAISupport:
     # ------------------------------------------------------------------
 
     def test_root_cause_openai_returns_empty_on_quota_error(self, caplog):
-        """OpenAI quota error is caught and returns ('', '', error_hint)."""
+        """OpenAI quota error is caught and returns ('', '', '', '', error_hint)."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1448,10 +1448,10 @@ class TestOpenAISupport:
             )
 
         assert result[:2] == ("", "")
-        assert result[3]  # error_hint must be non-empty (index 3 in 4-tuple)
+        assert result[4]  # error_hint must be non-empty (index 4 in 5-tuple)
 
     def test_root_cause_openai_returns_empty_on_auth_error(self, caplog):
-        """OpenAI 401 error is caught and returns ('', '', '', error_hint)."""
+        """OpenAI 401 error is caught and returns ('', '', '', '', error_hint)."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1472,10 +1472,10 @@ class TestOpenAISupport:
             )
 
         assert result[:2] == ("", "")
-        assert result[3]  # error_hint must be non-empty (index 3 in 4-tuple)
+        assert result[4]  # error_hint must be non-empty (index 4 in 5-tuple)
 
     def test_root_cause_openai_returns_empty_when_package_missing(self):
-        """When _OPENAI_AVAILABLE is False the method returns ('', '', '', '')."""
+        """When _OPENAI_AVAILABLE is False the method returns ('', '', '', '', '')."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1489,7 +1489,7 @@ class TestOpenAISupport:
                 flaky_metrics=[],
             )
 
-        assert result == ("", "", "", "")
+        assert result == ("", "", "", "", "")
 
     # ------------------------------------------------------------------
     # analyze_ticket – OpenAI used when Anthropic not configured
@@ -1780,7 +1780,7 @@ class TestGroqSupport:
     # ------------------------------------------------------------------
 
     def test_generate_root_cause_analysis_groq_success(self):
-        """A successful Groq call returns (root_cause, recommended_solution, '')."""
+        """A successful Groq call returns (root_cause, recommended_solution, '', '', '')."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1795,7 +1795,7 @@ class TestGroqSupport:
         skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
         with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
              patch.object(skill_module, "_openai", fake_openai, create=True):
-            rc, sol, snippet, hint = skill._generate_root_cause_analysis_groq(
+            rc, sol, al, snippet, hint = skill._generate_root_cause_analysis_groq(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1823,7 +1823,7 @@ class TestGroqSupport:
         with caplog.at_level("ERROR"), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
              patch.object(skill_module, "_openai", fake_openai, create=True):
-            rc, sol, snippet, hint = skill._generate_root_cause_analysis_groq(
+            rc, sol, al, snippet, hint = skill._generate_root_cause_analysis_groq(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1834,7 +1834,7 @@ class TestGroqSupport:
         assert "rate limit" in hint.lower()
 
     def test_groq_returns_empty_when_package_missing(self):
-        """When _OPENAI_AVAILABLE is False the Groq method returns ('', '', '', '')."""
+        """When _OPENAI_AVAILABLE is False the Groq method returns ('', '', '', '', '')."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1846,7 +1846,7 @@ class TestGroqSupport:
                 robot_runs=[],
                 flaky_metrics=[],
             )
-        assert result == ("", "", "", "")
+        assert result == ("", "", "", "", "")
 
     def test_groq_falls_back_on_model_not_found(self):
         """A 404 model-not-found triggers retry with the next fallback model."""
@@ -1879,7 +1879,7 @@ class TestGroqSupport:
         )
         with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
              patch.object(skill_module, "_openai", fake_openai, create=True):
-            rc, sol, snippet, hint = skill._generate_root_cause_analysis_groq(
+            rc, sol, al, snippet, hint = skill._generate_root_cause_analysis_groq(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -2101,7 +2101,7 @@ class TestParseAiResponseCodeSnippet:
     """Tests for _parse_ai_response – code-snippet extraction."""
 
     def test_extracts_code_snippet_from_three_section_response(self):
-        """A response with all three sections returns correct 3-tuple."""
+        """A response with all four sections returns correct 4-tuple."""
         from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
 
         response = (
@@ -2115,7 +2115,7 @@ class TestParseAiResponseCodeSnippet:
             "    assert True\n"
             "```"
         )
-        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        rc, sol, al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
 
         assert "system time" in rc
         assert "time-mocking" in sol
@@ -2131,7 +2131,7 @@ class TestParseAiResponseCodeSnippet:
             "**Recommended Solution:** Update config file.\n\n"
             "**Code Snippet:** N/A"
         )
-        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        rc, sol, al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
 
         assert "Config issue" in rc
         assert snippet == ""
@@ -2144,7 +2144,7 @@ class TestParseAiResponseCodeSnippet:
             "**Root Cause:** Network timeout.\n\n"
             "**Recommended Solution:** Add retry logic."
         )
-        _rc, _sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        _rc, _sol, _al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
         assert snippet == ""
 
     def test_code_snippet_is_stored_on_ticket_report(self):
@@ -2184,7 +2184,7 @@ class TestParseAiResponseCodeSnippet:
         assert "monotonic" in report.code_snippet or "time" in report.code_snippet
 
     def test_code_snippet_appears_in_formatted_markdown_report(self):
-        """The formatted Markdown report includes a '## 💻 Code Snippet' section."""
+        """The formatted Markdown report includes a '## 💻 Corrected Code Snippet' section."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
         from unittest.mock import MagicMock, patch
@@ -2216,7 +2216,7 @@ class TestParseAiResponseCodeSnippet:
              patch.object(skill_module, "_openai", fake_openai, create=True):
             report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
 
-        assert "💻 Code Snippet" in report.formatted_report
+        assert "💻 Corrected Code Snippet" in report.formatted_report
 
 
 # ===========================================================================
@@ -2268,14 +2268,14 @@ class TestHtmlReport:
         report = self._make_report(snippet="```python\nfrom freezegun import freeze_time\n```")
         html = render_html_report([report])
         assert "freezegun" in html
-        assert "Code Snippet" in html
+        assert "Corrected Code Snippet" in html
 
     def test_render_html_report_na_snippet_is_omitted(self):
         """When code_snippet is 'N/A', the snippet section must not appear."""
         from skills.flaky_test_analysis.html_report import render_html_report
         report = self._make_report(snippet="N/A")
         html = render_html_report([report])
-        assert "Code Snippet" not in html
+        assert "Corrected Code Snippet" not in html
 
     def test_render_html_report_batch_summary_table(self):
         """When multiple reports are provided, a summary table is rendered."""
@@ -3030,3 +3030,306 @@ class TestGitHubClientIntegration:
         assert kwargs.get("github_token") == "my-gh-token"
         assert kwargs.get("github_owner") == "nable-nc"
         assert kwargs.get("github_repo") == "n-central"
+
+
+# ===========================================================================
+# Feature: line-number annotation in extracted Robot test snippet
+# ===========================================================================
+
+class TestLineNumberAnnotation:
+    """_extract_test_case annotates each line with its 1-based file line number."""
+
+    _ROBOT_FILE = (
+        "*** Settings ***\n"
+        "Library    SeleniumLibrary\n\n"
+        "*** Test Cases ***\n"
+        "Verify Login\n"
+        "    Open Browser    ${URL}    Chrome\n"
+        "    Input Text    username    admin\n"
+        "    Click Button    Submit\n\n"
+        "Verify Logout\n"
+        "    Click Link    Logout\n"
+    )
+
+    def test_snippet_contains_line_number_prefix(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Verify Login")
+        # Lines must have the  │  separator
+        assert "│" in result
+
+    def test_snippet_has_correct_line_number(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Verify Login")
+        # "Verify Login" is on line 5 of the file (1-based)
+        assert "5 │ Verify Login" in result
+
+    def test_fallback_excerpt_has_line_numbers(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Does Not Exist")
+        assert "1 │ *** Settings ***" in result
+
+    def test_annotated_snippet_still_contains_keywords(self):
+        from skills.flaky_test_analysis.github_client import _extract_test_case
+        result = _extract_test_case(self._ROBOT_FILE, "Verify Login")
+        # Content still findable within annotation
+        assert "Open Browser" in result
+        assert "Input Text" in result
+
+
+# ===========================================================================
+# Feature: failing_test_name and affected_line in report
+# ===========================================================================
+
+class TestFailingTestNameAndAffectedLine:
+    """failing_test_name and affected_line are stored and rendered correctly."""
+
+    def _make_jira_with_xml(self, test_name="Verify Login", status="FAIL"):
+        xml = (
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<robot generator="Robot" generated="20240101 00:00:00.000">'
+            f'<suite name="TwoFactorAuthentication">'
+            f'<test name="{test_name}">'
+            f'<status status="{status}" message="Element not found"/>'
+            f'</test>'
+            f'</suite>'
+            f'<statistics/><errors/></robot>'
+        ).encode()
+
+        attachments = [{
+            "id": "1",
+            "filename": "output.xml",
+            "mimeType": "application/xml",
+            "size": len(xml),
+            "content": "https://example.atlassian.net/secure/attachment/1/output.xml",
+        }]
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "NCCF-99",
+            "summary": "2FA login failure",
+            "status": "Open",
+            "description": "",
+            "attachments": attachments,
+            "comments": [],
+        }
+        mock_jira.download_attachment.return_value = xml
+        return mock_jira
+
+    def test_failing_test_name_stored_on_report(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = self._make_jira_with_xml("Verify Login")
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = ("tests/login.robot", "5 │ Verify Login\n6 │     Open Browser")
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira, github_client=mock_github)
+        report = skill.analyze_ticket("NCCF-99", use_ai=False, post_comment=False)
+        assert report.failing_test_name == "Verify Login"
+
+    def test_failing_test_name_appears_in_markdown_report(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = self._make_jira_with_xml("Verify 2FA Login")
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = ("", "")
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira, github_client=mock_github)
+        report = skill.analyze_ticket("NCCF-99", use_ai=False, post_comment=False)
+        assert "Verify 2FA Login" in report.formatted_report
+
+    def test_affected_line_stored_on_report_from_ai(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+        mock_jira = self._make_jira_with_xml("Verify Login")
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = ("tests/login.robot", "5 │ Verify Login\n6 │     Click Button")
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:**\n- Button ID changed.\n\n"
+            "**Recommended Solution:**\n1. Update the button locator.\n\n"
+            "**Affected Line:** `6 │     Click Button    Submit` — locator outdated\n\n"
+            "**Code Snippet:** N/A"
+        )
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+        skill = FlakyTestAnalysisSkill(
+            openai_api_key="sk-test",
+            jira_client=mock_jira,
+            github_client=mock_github,
+        )
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            report = skill.analyze_ticket("NCCF-99", use_ai=True, post_comment=False)
+        assert report.affected_line != ""
+        assert "Click Button" in report.affected_line or "6" in report.affected_line
+
+    def test_affected_line_appears_in_markdown_report(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+        mock_jira = self._make_jira_with_xml("Verify Login")
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = ("tests/login.robot", "5 │ Verify Login")
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:**\n- Element not found.\n\n"
+            "**Recommended Solution:**\n1. Fix locator.\n\n"
+            "**Affected Line:** `7 │     Input Text    username    admin` — field renamed\n\n"
+            "**Code Snippet:** N/A"
+        )
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+        skill = FlakyTestAnalysisSkill(
+            openai_api_key="sk-test",
+            jira_client=mock_jira,
+            github_client=mock_github,
+        )
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            report = skill.analyze_ticket("NCCF-99", use_ai=True, post_comment=False)
+        assert "📍 Affected Line" in report.formatted_report
+
+    def test_no_affected_line_section_when_ai_not_used(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = self._make_jira_with_xml("Verify Login")
+        mock_github = MagicMock()
+        mock_github.search_robot_test.return_value = ("", "")
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira, github_client=mock_github)
+        report = skill.analyze_ticket("NCCF-99", use_ai=False, post_comment=False)
+        assert "📍 Affected Line" not in report.formatted_report
+
+
+# ===========================================================================
+# Feature: affected_line section in HTML report
+# ===========================================================================
+
+class TestHtmlReportAffectedLine:
+    """HTML report renders affected_line correctly."""
+
+    def _make_report(self, affected_line="", failing_test_name=""):
+        from skills.flaky_test_analysis import TicketAnalysisReport
+        return TicketAnalysisReport(
+            issue_key="NCCF-1",
+            summary="Test",
+            status="Open",
+            affected_line=affected_line,
+            failing_test_name=failing_test_name,
+            formatted_report="",
+        )
+
+    def test_html_report_renders_affected_line(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(
+            affected_line="42 │     Click Button    Submit — locator outdated"
+        )
+        html = render_html_report([report])
+        assert "Affected Line" in html
+        assert "Click Button" in html
+
+    def test_html_report_omits_affected_line_when_empty(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report()
+        html = render_html_report([report])
+        assert "Affected Line" not in html
+
+    def test_html_report_renders_failing_test_name_in_meta_table(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(failing_test_name="Verify 2FA Login")
+        html = render_html_report([report])
+        assert "Failing Test" in html
+        assert "Verify 2FA Login" in html
+
+    def test_html_report_omits_failing_test_row_when_empty(self):
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report()
+        html = render_html_report([report])
+        # The "Failing Test" row should not appear when the field is empty
+        assert "Failing Test" not in html
+
+
+# ===========================================================================
+# Feature: _parse_ai_response handles four-section response
+# ===========================================================================
+
+class TestParseAiResponseFourSections:
+    """_parse_ai_response correctly extracts all four sections."""
+
+    def test_extracts_all_four_sections(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        response = (
+            "**Root Cause:**\n- Timer depends on wall clock.\n- No mocking used.\n\n"
+            "**Recommended Solution:**\n1. Add freezegun.\n2. Decorate test.\n\n"
+            "**Affected Line:** `7 │     time.sleep(5)` — hardcoded sleep causes flakiness\n\n"
+            "**Code Snippet:**\n```python\n@freeze_time('2024-01-01')\ndef test_fn():\n    pass\n```"
+        )
+        rc, sol, al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        assert "wall clock" in rc
+        assert "freezegun" in sol
+        assert "sleep" in al
+        assert "freeze_time" in snippet
+
+    def test_affected_line_empty_when_na(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        response = (
+            "**Root Cause:** Config problem.\n\n"
+            "**Recommended Solution:** Fix config.\n\n"
+            "**Affected Line:** N/A\n\n"
+            "**Code Snippet:** N/A"
+        )
+        _rc, _sol, al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        assert al == ""
+        assert snippet == ""
+
+    def test_affected_line_empty_when_missing(self):
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+        response = (
+            "**Root Cause:** Network error.\n\n"
+            "**Recommended Solution:** Add retry.\n\n"
+            "**Code Snippet:** N/A"
+        )
+        _rc, _sol, al, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        assert al == ""
+
+
+# ===========================================================================
+# Feature: prompt includes failing_test_name and Affected Line instruction
+# ===========================================================================
+
+class TestPromptFailingTestAndAffectedLine:
+    """The AI prompt includes the failing test name and Affected Line section."""
+
+    def _make_skill(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill()
+
+    def test_prompt_includes_failing_test_name(self):
+        skill = self._make_skill()
+        issue = {"key": "NCCF-1", "summary": "Test", "status": "Open",
+                 "description": "", "comments": []}
+        prompt = skill._build_root_cause_prompt(
+            issue, [], [], [], failing_test_name="Verify 2FA Login"
+        )
+        assert "Verify 2FA Login" in prompt
+
+    def test_prompt_includes_affected_line_instruction(self):
+        skill = self._make_skill()
+        issue = {"key": "NCCF-1", "summary": "Test", "status": "Open",
+                 "description": "", "comments": []}
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+        assert "Affected Line" in prompt
+
+    def test_prompt_forbids_chain_of_thought(self):
+        skill = self._make_skill()
+        issue = {"key": "NCCF-1", "summary": "Test", "status": "Open",
+                 "description": "", "comments": []}
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+        # The prompt must explicitly forbid chain-of-thought / step numbering
+        assert "chain-of-thought" in prompt.lower() or "reasoning" in prompt.lower()
+
+    def test_prompt_source_includes_line_prefix_note(self):
+        skill = self._make_skill()
+        issue = {"key": "NCCF-1", "summary": "Test", "status": "Open",
+                 "description": "", "comments": []}
+        prompt = skill._build_root_cause_prompt(
+            issue, [], [], [],
+            robot_source_file="tests/login.robot",
+            robot_source_snippet="5 │ Verify Login\n6 │     Open Browser",
+        )
+        assert "line number" in prompt.lower() or "│" in prompt

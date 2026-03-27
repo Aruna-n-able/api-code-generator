@@ -23,7 +23,7 @@ import base64
 import logging
 import os
 import re
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import requests
 
@@ -182,6 +182,12 @@ def _extract_test_case(file_content: str, test_name: str) -> str:
     The name match is case-insensitive and treats runs of underscores and
     spaces as equivalent, following Robot Framework's own convention.
 
+    Each returned line is prefixed with its 1-based line number in the
+    original file so that the AI can reference specific lines, e.g.::
+
+        42 │ Verify Login
+        43 │     Open Browser    ${URL}    Chrome
+
     Parameters
     ----------
     file_content:
@@ -192,13 +198,22 @@ def _extract_test_case(file_content: str, test_name: str) -> str:
     Returns
     -------
     str
-        The extracted test-case block (name line + body).  When the specific
-        test cannot be found by name, the first 3 000 characters of the file
-        are returned as a fallback.
+        The extracted test-case block with line-number prefixes.  When the
+        specific test cannot be found by name, the first 3 000 characters
+        of the file (with line-number prefixes) are returned as a fallback.
     """
 
     def _normalise(s: str) -> str:
         return re.sub(r"[\s_]+", " ", s).strip().lower()
+
+    def _annotate(raw_lines: List[str], start_idx: int, end_idx: int) -> str:
+        """Prefix each line with its 1-based file line number."""
+        width = len(str(end_idx))  # number of digits for right-alignment
+        parts = []
+        for i in range(start_idx, end_idx):
+            line_no = i + 1  # 1-based
+            parts.append(f"{line_no:>{width}} │ {raw_lines[i].rstrip()}")
+        return "\n".join(parts)
 
     norm_name = _normalise(test_name)
     lines = file_content.splitlines(keepends=True)
@@ -246,9 +261,10 @@ def _extract_test_case(file_content: str, test_name: str) -> str:
         logger.info(
             "Test case '%s' not found by name; returning file excerpt", test_name
         )
-        return file_content[:3000]
+        end = min(50, len(lines))
+        return _annotate(lines, 0, end)
 
     if test_end is None:
         test_end = len(lines)
 
-    return "".join(lines[test_start:test_end]).rstrip()
+    return _annotate(lines, test_start, test_end)

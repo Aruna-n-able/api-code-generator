@@ -436,6 +436,7 @@ def markdown_wrap(md: str, title: str = "Flaky Test Analysis Report") -> str:
 
 def _render_ticket_card(r: "TicketAnalysisReport") -> str:
     """Render a single :class:`TicketAnalysisReport` as an HTML card."""
+    failing_test = (getattr(r, "failing_test_name", "") or "").strip()
     lines: List[str] = [
         f'<div class="card" id="{_e(r.issue_key)}">',
         '<div class="card-header">',
@@ -447,8 +448,13 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
         f"<tr><td><strong>Ticket</strong></td><td>{_e(r.issue_key)}</td></tr>",
         f"<tr><td><strong>Status</strong></td><td>{_badge(r.status)}</td></tr>",
         f"<tr><td><strong>Attachments analysed</strong></td><td>{len(r.attachments)}</td></tr>",
-        "</table>",
     ]
+    if failing_test:
+        lines.append(
+            f"<tr><td><strong>Failing Test</strong></td>"
+            f"<td><code>{_e(failing_test)}</code></td></tr>"
+        )
+    lines.append("</table>")
 
     # attachments
     if r.attachments:
@@ -529,6 +535,14 @@ def _render_ticket_card(r: "TicketAnalysisReport") -> str:
     if r.root_cause:
         lines.append("<h2>🔍 Root Cause</h2>")
         lines.append(_pointwise_html(r.root_cause))
+
+    # affected line (AI-identified)
+    al = (getattr(r, "affected_line", "") or "").strip()
+    if al and al.upper() not in ("N/A", "NONE"):
+        lines += [
+            "<h2>📍 Affected Line</h2>",
+            f"<p><code>{_e(al)}</code></p>",
+        ]
 
     # recommended solution – rendered as ordered list
     if r.recommended_solution:
