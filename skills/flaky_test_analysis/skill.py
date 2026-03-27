@@ -318,6 +318,18 @@ class FlakyTestAnalysisSkill:
     # Primary entry point
     # ------------------------------------------------------------------
 
+    def _create_openai_client(self):
+        """Return an OpenAI client configured for this skill instance.
+
+        ``max_retries=0`` is set intentionally so that the SDK does not make
+        additional attempts on HTTP errors.  The model fallback chain in
+        ``_generate_ai_summary_openai`` and
+        ``_generate_root_cause_analysis_openai`` already handles model-level
+        retries (404), and for permanent errors such as quota exceeded (429)
+        or authentication failures (401), retrying is wasteful.
+        """
+        return _openai.OpenAI(api_key=self._openai_api_key, max_retries=0)
+
     def run_analysis(
         self,
         output_xml_paths: List[str | Path],
@@ -475,7 +487,7 @@ class FlakyTestAnalysisSkill:
                 patterns = ", ".join(r.pattern_name for r in recs)
                 prompt_lines.append(f"  Patterns: {patterns}")
 
-        client = _openai.OpenAI(api_key=self._openai_api_key)
+        client = self._create_openai_client()
         prompt = "\n".join(prompt_lines)
         models_to_try = _build_model_list(self._openai_model)
         for model in models_to_try:
@@ -1093,7 +1105,7 @@ class FlakyTestAnalysisSkill:
 
         prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
 
-        client = _openai.OpenAI(api_key=self._openai_api_key)
+        client = self._create_openai_client()
         models_to_try = _build_model_list(self._openai_model)
         for model in models_to_try:
             try:
@@ -1264,11 +1276,15 @@ class FlakyTestAnalysisSkill:
             lines += ["## 🔍 Root Cause", "", root_cause, ""]
         elif not use_ai:
             has_patterns = bool(recommendations)
-            suffix = (
-                "See Robot Framework test results and detected patterns above."
-                if has_patterns
-                else "See Robot Framework test results above."
-            )
+            has_robot_results = bool(robot_runs)
+            if has_patterns and has_robot_results:
+                suffix = "See Robot Framework test results and detected patterns above."
+            elif has_robot_results:
+                suffix = "See Robot Framework test results above."
+            elif has_patterns:
+                suffix = "See detected patterns above."
+            else:
+                suffix = "No Robot Framework test results were found in the ticket attachments."
             if ai_error_hint:
                 intro = f"_AI analysis unavailable ({ai_error_hint})."
             else:

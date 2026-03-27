@@ -897,6 +897,68 @@ class TestAnalyzeTicket:
         report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
         assert "detected patterns" not in report.formatted_report
 
+    def test_no_attachment_ai_error_shows_no_results_found_message(self):
+        """When AI fails AND there are no attachments the Root Cause message says
+        'No Robot Framework test results were found' rather than 'See … above.'"""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        quota_exc = Exception("You exceeded your current quota, please check your plan.")
+        quota_exc.status_code = 429
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value.chat.completions.create.side_effect = quota_exc
+
+        # No API key for Anthropic → OpenAI path; no attachments on the ticket
+        mock_jira = _make_jira_mock()  # 0 attachments
+        skill = FlakyTestAnalysisSkill(
+            openai_api_key="sk-test",
+            jira_client=mock_jira,
+        )
+
+        with patch.object(skill_module, "_openai", fake_openai, create=True), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True):
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "No Robot Framework test results were found" in report.formatted_report
+        assert "See Robot Framework test results above" not in report.formatted_report
+
+    def test_no_attachment_no_ai_shows_no_results_found_message(self):
+        """When --no-ai is used AND there are no attachments the Root Cause message says
+        'No Robot Framework test results were found' rather than 'See … above.'"""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        mock_jira = _make_jira_mock()  # 0 attachments
+        skill = FlakyTestAnalysisSkill(jira_client=mock_jira)
+        report = skill.analyze_ticket("NCCF-1", use_ai=False, post_comment=False)
+        assert "No Robot Framework test results were found" in report.formatted_report
+        assert "See Robot Framework test results above" not in report.formatted_report
+
+    def test_openai_client_created_with_max_retries_zero(self):
+        """_create_openai_client() passes max_retries=0 to the OpenAI constructor
+        so that the SDK does not make extra attempts for permanent errors
+        (quota exceeded, auth failure, model not found)."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+
+        captured_kwargs: list = []
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured_kwargs.append(kwargs)
+
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.side_effect = FakeClient
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-test")
+        with patch.object(skill_module, "_openai", fake_openai, create=True):
+            skill._create_openai_client()
+
+        assert captured_kwargs, "OpenAI() constructor should have been called"
+        assert captured_kwargs[0].get("max_retries") == 0, (
+            "_create_openai_client must pass max_retries=0 to OpenAI() to prevent "
+            "wasteful retry delays for permanent errors"
+        )
+
     def test_is_zip_archive_detects_by_extension(self):
         from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
         assert FlakyTestAnalysisSkill._is_zip_archive("archive.zip", b"anything") is True
