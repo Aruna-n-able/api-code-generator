@@ -330,6 +330,7 @@ class TicketAnalysisReport:
     recommendations: Dict[str, List[Recommendation]] = field(default_factory=dict)
     root_cause: str = ""
     recommended_solution: str = ""
+    code_snippet: str = ""
     formatted_report: str = ""
 
 
@@ -811,20 +812,21 @@ class FlakyTestAnalysisSkill:
         # ----------------------------------------------------------------
         root_cause = ""
         recommended_solution = ""
+        code_snippet = ""
         ai_error_hint = ""
         if use_ai:
             if self._api_key and _ANTHROPIC_AVAILABLE:
-                root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis(
+                root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis(
                     issue, attachment_infos, robot_runs, flaky_metrics
                 )
             if not root_cause and self._openai_api_key and _OPENAI_AVAILABLE:
                 # Use OpenAI if Anthropic is not configured or failed
-                root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis_openai(
+                root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis_openai(
                     issue, attachment_infos, robot_runs, flaky_metrics
                 )
             if not root_cause and self._groq_api_key and _OPENAI_AVAILABLE:
                 # Use Groq (free tier) as the last-resort fallback
-                root_cause, recommended_solution, ai_error_hint = self._generate_root_cause_analysis_groq(
+                root_cause, recommended_solution, code_snippet, ai_error_hint = self._generate_root_cause_analysis_groq(
                     issue, attachment_infos, robot_runs, flaky_metrics
                 )
 
@@ -839,6 +841,7 @@ class FlakyTestAnalysisSkill:
             flaky_metrics,
             root_cause,
             recommended_solution,
+            code_snippet,
             use_ai=use_ai and not ai_error_hint,
             recommendations=ticket_recommendations,
             ai_key_set=any_ai_key_set,
@@ -855,6 +858,7 @@ class FlakyTestAnalysisSkill:
             recommendations=ticket_recommendations,
             root_cause=root_cause,
             recommended_solution=recommended_solution,
+            code_snippet=code_snippet,
             formatted_report=formatted,
         )
 
@@ -1075,10 +1079,14 @@ class FlakyTestAnalysisSkill:
             "Your task is to:",
             "  1. Identify the **root cause** of the failure.",
             "  2. Provide a clear, actionable **recommended solution**.",
+            "  3. Provide a **code snippet** implementing the fix.",
             "",
-            "Respond with exactly two clearly labelled sections:",
+            "Respond with exactly three clearly labelled sections:",
             "  **Root Cause:** (2–5 sentences describing what went wrong and why)",
             "  **Recommended Solution:** (concrete steps or code changes to fix the issue)",
+            "  **Code Snippet:** (a ready-to-use code example implementing the fix, using a "
+            "fenced code block with the appropriate language tag such as ```python or "
+            "```robot; write \"N/A\" if no code change is needed)",
             "",
             "## Jira Ticket",
             "",
@@ -1155,11 +1163,11 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
-    ) -> Tuple[str, str, str]:
+    ) -> Tuple[str, str, str, str]:
         """
         Ask Claude to identify the root cause and recommend a fix.
 
-        Returns a tuple of (root_cause, recommended_solution, error_hint) strings.
+        Returns a tuple of (root_cause, recommended_solution, code_snippet, error_hint) strings.
         error_hint is non-empty only when the API call failed; it is a short,
         user-facing description of what went wrong.
         """
@@ -1168,7 +1176,7 @@ class FlakyTestAnalysisSkill:
                 "anthropic package not installed; skipping AI analysis. "
                 "Install with: pip install anthropic"
             )
-            return "", "", ""
+            return "", "", "", ""
 
         prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
 
@@ -1176,18 +1184,18 @@ class FlakyTestAnalysisSkill:
             client = _anthropic.Anthropic(api_key=self._api_key)
             message = client.messages.create(
                 model=self._model,
-                max_tokens=1024,
+                max_tokens=2048,
                 messages=[{"role": "user", "content": prompt}],
             )
 
             full_response = message.content[0].text if message.content else ""
         except Exception as exc:
             error_hint = _handle_anthropic_error(exc)
-            return "", "", error_hint
+            return "", "", "", error_hint
 
-        # Split the response into root cause / solution sections
-        root_cause, recommended_solution = self._parse_ai_response(full_response)
-        return root_cause, recommended_solution, ""
+        # Split the response into root cause / solution / code snippet sections
+        root_cause, recommended_solution, code_snippet = self._parse_ai_response(full_response)
+        return root_cause, recommended_solution, code_snippet, ""
 
     def _generate_root_cause_analysis_openai(
         self,
@@ -1195,11 +1203,11 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
-    ) -> Tuple[str, str, str]:
+    ) -> Tuple[str, str, str, str]:
         """
         Ask OpenAI to identify the root cause and recommend a fix.
 
-        Returns a tuple of (root_cause, recommended_solution, error_hint) strings.
+        Returns a tuple of (root_cause, recommended_solution, code_snippet, error_hint) strings.
         error_hint is non-empty only when the API call failed; it is a short,
         user-facing description of what went wrong.
         """
@@ -1208,7 +1216,7 @@ class FlakyTestAnalysisSkill:
                 "openai package not installed; skipping AI analysis. "
                 "Install with: pip install openai"
             )
-            return "", "", ""
+            return "", "", "", ""
 
         prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
 
@@ -1218,7 +1226,7 @@ class FlakyTestAnalysisSkill:
             try:
                 response = client.chat.completions.create(
                     model=model,
-                    max_tokens=1024,
+                    max_tokens=2048,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 if model != self._openai_model:
@@ -1230,8 +1238,8 @@ class FlakyTestAnalysisSkill:
                     if response.choices
                     else ""
                 )
-                root_cause, recommended_solution = self._parse_ai_response(full_response)
-                return root_cause, recommended_solution, ""
+                root_cause, recommended_solution, code_snippet = self._parse_ai_response(full_response)
+                return root_cause, recommended_solution, code_snippet, ""
             except Exception as exc:
                 if _is_openai_model_not_found(exc) and model != models_to_try[-1]:
                     logger.warning(
@@ -1239,7 +1247,7 @@ class FlakyTestAnalysisSkill:
                     )
                     continue
                 error_hint = _handle_openai_error(exc)
-                return "", "", error_hint
+                return "", "", "", error_hint
 
     def _generate_root_cause_analysis_groq(
         self,
@@ -1247,7 +1255,7 @@ class FlakyTestAnalysisSkill:
         attachments: List[AttachmentInfo],
         robot_runs: List[ParsedRun],
         flaky_metrics: List[TestMetrics],
-    ) -> Tuple[str, str, str]:
+    ) -> Tuple[str, str, str, str]:
         """
         Ask Groq (free LLM tier) to identify the root cause and recommend a fix.
 
@@ -1255,7 +1263,7 @@ class FlakyTestAnalysisSkill:
         Llama 3.3 70B.  It is used as the last-resort AI fallback when both
         Anthropic and OpenAI are unavailable or have exceeded their quotas.
 
-        Returns a tuple of (root_cause, recommended_solution, error_hint).
+        Returns a tuple of (root_cause, recommended_solution, code_snippet, error_hint).
         error_hint is non-empty only when the API call failed.
         """
         if not _OPENAI_AVAILABLE:
@@ -1263,7 +1271,7 @@ class FlakyTestAnalysisSkill:
                 "openai package not installed; Groq integration requires it. "
                 "Install with: pip install openai"
             )
-            return "", "", ""
+            return "", "", "", ""
 
         prompt = self._build_root_cause_prompt(issue, attachments, robot_runs, flaky_metrics)
 
@@ -1273,7 +1281,7 @@ class FlakyTestAnalysisSkill:
             try:
                 response = client.chat.completions.create(
                     model=model,
-                    max_tokens=1024,
+                    max_tokens=2048,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 if model != self._groq_model:
@@ -1285,8 +1293,8 @@ class FlakyTestAnalysisSkill:
                     if response.choices
                     else ""
                 )
-                root_cause, recommended_solution = self._parse_ai_response(full_response)
-                return root_cause, recommended_solution, ""
+                root_cause, recommended_solution, code_snippet = self._parse_ai_response(full_response)
+                return root_cause, recommended_solution, code_snippet, ""
             except Exception as exc:
                 if (
                     (getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc))
@@ -1297,24 +1305,37 @@ class FlakyTestAnalysisSkill:
                     )
                     continue
                 error_hint = _handle_groq_error(exc)
-                return "", "", error_hint
+                return "", "", "", error_hint
 
     @staticmethod
-    def _parse_ai_response(response: str) -> Tuple[str, str]:
-        """Extract root cause and recommended solution from the AI response."""
+    def _parse_ai_response(response: str) -> Tuple[str, str, str]:
+        """Extract root cause, recommended solution, and code snippet from the AI response.
+
+        Returns a ``(root_cause, recommended_solution, code_snippet)`` 3-tuple.
+        ``code_snippet`` is the empty string when the AI returned "N/A" or did not
+        include a ``Code Snippet:`` section.
+        """
         root_cause = ""
         recommended_solution = ""
+        code_snippet = ""
 
-        # Look for the two labelled sections (case-insensitive)
+        # Look for the three labelled sections (case-insensitive)
         import re
 
         rc_match = re.search(
-            r"\*{0,2}Root Cause:?\*{0,2}\s*(.*?)(?=\*{0,2}Recommended Solution:?|\Z)",
+            r"\*{0,2}Root Cause:?\*{0,2}\s*(.*?)"
+            r"(?=\*{0,2}Recommended Solution:?|\*{0,2}Code Snippet:?|\Z)",
             response,
             re.IGNORECASE | re.DOTALL,
         )
         sol_match = re.search(
-            r"\*{0,2}Recommended Solution:?\*{0,2}\s*(.*)",
+            r"\*{0,2}Recommended Solution:?\*{0,2}\s*(.*?)"
+            r"(?=\*{0,2}Code Snippet:?|\Z)",
+            response,
+            re.IGNORECASE | re.DOTALL,
+        )
+        snippet_match = re.search(
+            r"\*{0,2}Code Snippet:?\*{0,2}\s*(.*)",
             response,
             re.IGNORECASE | re.DOTALL,
         )
@@ -1323,12 +1344,16 @@ class FlakyTestAnalysisSkill:
             root_cause = rc_match.group(1).strip()
         if sol_match:
             recommended_solution = sol_match.group(1).strip()
+        if snippet_match:
+            snippet_text = snippet_match.group(1).strip()
+            if snippet_text.upper() not in ("N/A", "NONE", ""):
+                code_snippet = snippet_text
 
         # Fallback: if the model didn't use the expected labels, return the full text
         if not root_cause and not recommended_solution:
             root_cause = response.strip()
 
-        return root_cause, recommended_solution
+        return root_cause, recommended_solution, code_snippet
 
     # ------------------------------------------------------------------
     # Ticket report formatting
@@ -1342,6 +1367,7 @@ class FlakyTestAnalysisSkill:
         flaky_metrics: List[TestMetrics],
         root_cause: str,
         recommended_solution: str,
+        code_snippet: str = "",
         use_ai: bool = True,
         recommendations: Optional[Dict[str, List[Recommendation]]] = None,
         ai_key_set: bool = False,
@@ -1487,6 +1513,11 @@ class FlakyTestAnalysisSkill:
             lines += ["## ✅ Recommended Solution", "", recommended_solution, ""]
         elif root_cause:
             lines += ["## ✅ Recommended Solution", "", "_See root cause above._", ""]
+
+        # Code snippet
+        snippet = (code_snippet or "").strip()
+        if snippet and snippet.upper() not in ("N/A", "NONE"):
+            lines += ["## 💻 Code Snippet", "", snippet, ""]
 
         lines += [
             "---",

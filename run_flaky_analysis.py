@@ -2,7 +2,7 @@
 """
 run_flaky_analysis.py – Command-line entry point for the Flaky Test Analysis Skill.
 
-Two modes are available:
+Three modes are available:
 
 MODE 1 – Local file analysis (classic)
 ---------------------------------------
@@ -10,24 +10,38 @@ MODE 1 – Local file analysis (classic)
                                  [--jira-issue PROJ-123]
                                  [--no-ai]
                                  [--output-file report.md]
+                                 [--html-report report.html]
 
     Analyse one or more local Robot Framework output.xml files and (optionally)
     post the flakiness report to a Jira ticket.
 
-MODE 2 – Jira ticket-driven analysis (new)
--------------------------------------------
+MODE 2 – Single Jira ticket-driven analysis
+--------------------------------------------
     python run_flaky_analysis.py --jira-ticket NCCF-1593628
                                  [--no-ai]
                                  [--no-post]
                                  [--output-file report.md]
+                                 [--html-report report.html]
 
     Given a Jira ticket ID the skill will:
       1. Fetch the ticket (summary, description, comments).
       2. Download all attachments.
       3. Parse any Robot Framework output.xml files found.
       4. Extract and analyse log files (HTML tags are stripped automatically).
-      5. Use Claude or OpenAI to identify the root cause and recommend a fix.
+      5. Use Claude, OpenAI, or Groq to identify the root cause, recommend a
+         fix, and provide a corrective code snippet.
       6. Post the analysis back to the Jira ticket (unless --no-post is given).
+
+MODE 3 – Batch Jira ticket analysis
+-------------------------------------
+    python run_flaky_analysis.py --jira-tickets KEY1 KEY2 KEY3 ...
+                                 [--no-ai]
+                                 [--no-post]
+                                 [--html-report report.html]
+
+    Analyse multiple Jira tickets in one run.  A combined HTML report is
+    written when --html-report is provided.  Individual Markdown reports are
+    printed to stdout separated by dividers.
 
 Examples
 --------
@@ -42,15 +56,20 @@ Examples
     python run_flaky_analysis.py \\
         --robot-output output.xml --jira-issue OPS-42
 
-    # Ticket-driven mode
+    # Single ticket-driven mode
     python run_flaky_analysis.py --jira-ticket NCCF-1593628
 
-    # Ticket-driven mode – no AI, print report to stdout only
-    python run_flaky_analysis.py --jira-ticket NCCF-1593628 --no-ai --no-post
+    # Batch ticket-driven mode (multiple tickets)
+    python run_flaky_analysis.py --jira-tickets NCCF-1 NCCF-2 NCCF-3
 
-    # Save report to file
+    # Batch mode – no AI, no Jira post, write HTML report
     python run_flaky_analysis.py \\
-        --robot-output output.xml --no-ai --output-file flaky_report.md
+        --jira-tickets NCCF-1 NCCF-2 --no-ai --no-post --html-report report.html
+
+    # Save single-ticket report to file
+    python run_flaky_analysis.py \\
+        --jira-ticket NCCF-1593628 --no-ai --output-file flaky_report.md \\
+        --html-report flaky_report.html
 """
 
 import argparse
@@ -68,6 +87,7 @@ try:
     # loaded when PatternDatabase is instantiated) are caught later during
     # skill construction.
     from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+    from skills.flaky_test_analysis.html_report import render_html_report, markdown_wrap
 except ImportError as _import_exc:
     print(
         f"ERROR: A required dependency is missing: {_import_exc}\n"
@@ -101,7 +121,7 @@ def parse_args(argv=None):
         default=None,
         help="Path(s) to Robot Framework output.xml file(s). "
              "Provide multiple files from different CI runs to detect flakiness. "
-             "Mutually exclusive with --jira-ticket.",
+             "Mutually exclusive with --jira-ticket and --jira-tickets.",
     )
     parser.add_argument(
         "--jira-issue",
@@ -113,7 +133,7 @@ def parse_args(argv=None):
     )
 
     # ----------------------------------------------------------------
-    # Mode 2 – Jira ticket-driven
+    # Mode 2 – single Jira ticket-driven
     # ----------------------------------------------------------------
     parser.add_argument(
         "--jira-ticket",
@@ -122,13 +142,28 @@ def parse_args(argv=None):
         help="Jira ticket key to READ and analyse (e.g. NCCF-1593628). "
              "The skill fetches the ticket, downloads attachments, analyses logs, "
              "and posts the root-cause report back to the ticket. "
-             "Mutually exclusive with --robot-output.",
+             "Mutually exclusive with --robot-output and --jira-tickets.",
     )
+
+    # ----------------------------------------------------------------
+    # Mode 3 – batch Jira ticket-driven
+    # ----------------------------------------------------------------
+    parser.add_argument(
+        "--jira-tickets",
+        nargs="+",
+        metavar="KEY",
+        default=None,
+        help="One or more Jira ticket keys to analyse in batch "
+             "(e.g. NCCF-1 NCCF-2 NCCF-3). "
+             "Each ticket is analysed individually and a combined report is "
+             "produced. Mutually exclusive with --robot-output and --jira-ticket.",
+    )
+
     parser.add_argument(
         "--no-post",
         action="store_true",
         default=False,
-        help="(ticket-driven mode only) Do not post the analysis back to Jira.",
+        help="(ticket-driven modes only) Do not post the analysis back to Jira.",
     )
 
     # ----------------------------------------------------------------
@@ -145,8 +180,17 @@ def parse_args(argv=None):
         "--output-file",
         metavar="PATH",
         default=None,
-        help="Write the formatted report to this file (Markdown). "
-             "The report is always printed to stdout as well.",
+        help="Write the formatted Markdown report to this file. "
+             "The report is always printed to stdout as well. "
+             "In batch mode the combined Markdown for all tickets is written.",
+    )
+    parser.add_argument(
+        "--html-report",
+        metavar="PATH",
+        default=None,
+        help="Write a self-contained HTML report to this file. "
+             "Works with all three modes. In batch mode the HTML file contains "
+             "a summary table plus a card for every analysed ticket.",
     )
     parser.add_argument(
         "--model",
@@ -192,6 +236,34 @@ def _check_jira_env() -> list[str]:
     return [v for v in required if not os.environ.get(v, "").strip()]
 
 
+def _jira_env_error_and_exit() -> None:
+    """Print a clear error message for missing Jira env vars and exit."""
+    missing_vars = _check_jira_env()
+    if not missing_vars:
+        return
+    print(
+        "ERROR: The following environment variables are required to "
+        "connect to Jira but are not set:\n",
+        file=sys.stderr,
+    )
+    for var in missing_vars:
+        print(f"  {var}", file=sys.stderr)
+    print(
+        "\nSet them and re-run, for example:\n"
+        "\n"
+        "  export JIRA_BASE_URL='https://your-org.atlassian.net'\n"
+        "  export JIRA_USER_EMAIL='your-email@your-org.com'\n"
+        "  export JIRA_API_TOKEN='<your-atlassian-api-token>'\n"
+        "\n"
+        "Create an API token at: https://id.atlassian.com/manage-profile/security/api-tokens\n"
+        "\n"
+        "Add --no-ai to skip the AI step if no AI API key is set.\n"
+        "For a free AI option, set GROQ_API_KEY (see https://console.groq.com).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def main(argv=None):
     args = parse_args(argv)
 
@@ -201,17 +273,23 @@ def main(argv=None):
     )
 
     # Validate: exactly one mode must be chosen
-    if args.jira_ticket and args.robot_output:
+    modes_chosen = sum([
+        bool(args.robot_output),
+        bool(args.jira_ticket),
+        bool(args.jira_tickets),
+    ])
+    if modes_chosen > 1:
         print(
-            "ERROR: --jira-ticket and --robot-output are mutually exclusive. "
-            "Use one or the other.",
+            "ERROR: --jira-ticket, --jira-tickets, and --robot-output are mutually exclusive. "
+            "Use only one.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    if not args.jira_ticket and not args.robot_output:
+    if modes_chosen == 0:
         print(
-            "ERROR: Provide either --jira-ticket KEY or --robot-output FILE [FILE ...]",
+            "ERROR: Provide one of: --jira-ticket KEY, --jira-tickets KEY [KEY ...], "
+            "or --robot-output FILE [FILE ...]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -241,33 +319,59 @@ def main(argv=None):
         sys.exit(1)
 
     # ----------------------------------------------------------------
-    # Mode 2 – Jira ticket-driven analysis
+    # Mode 3 – Batch Jira ticket-driven analysis
+    # ----------------------------------------------------------------
+    if args.jira_tickets:
+        if _check_jira_env():
+            _jira_env_error_and_exit()
+
+        ticket_reports = []
+        all_formatted = []
+        flaky_count = 0
+
+        for key in args.jira_tickets:
+            try:
+                report = skill.analyze_ticket(
+                    jira_issue_key=key,
+                    use_ai=not args.no_ai,
+                    post_comment=not args.no_post,
+                )
+                ticket_reports.append(report)
+                all_formatted.append(report.formatted_report)
+                flaky_count += len([m for m in report.flaky_metrics if m.flakiness_score != "Stable"])
+            except RuntimeError as exc:
+                print(f"ERROR [{key}]: {exc}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001
+                print(f"ERROR [{key}]: Unexpected failure: {exc}", file=sys.stderr)
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
+        combined_md = ("\n\n" + "─" * 60 + "\n\n").join(all_formatted)
+        print(combined_md)
+
+        if args.output_file:
+            output_path = Path(args.output_file)
+            output_path.write_text(combined_md, encoding="utf-8")
+            print(f"\nReport written to: {output_path}", file=sys.stderr)
+
+        if args.html_report and ticket_reports:
+            html = render_html_report(
+                ticket_reports,
+                title=f"Flaky Test Analysis – {len(ticket_reports)} ticket(s)",
+            )
+            html_path = Path(args.html_report)
+            html_path.write_text(html, encoding="utf-8")
+            print(f"HTML report written to: {html_path}", file=sys.stderr)
+
+        sys.exit(1 if flaky_count > 0 else 0)
+
+    # ----------------------------------------------------------------
+    # Mode 2 – Single Jira ticket-driven analysis
     # ----------------------------------------------------------------
     if args.jira_ticket:
-        # Give a clear, actionable error before making any network calls.
-        missing_vars = _check_jira_env()
-        if missing_vars:
-            print(
-                "ERROR: The following environment variables are required to "
-                "connect to Jira but are not set:\n",
-                file=sys.stderr,
-            )
-            for var in missing_vars:
-                print(f"  {var}", file=sys.stderr)
-            print(
-                "\nSet them and re-run, for example:\n"
-                "\n"
-                "  export JIRA_BASE_URL='https://your-org.atlassian.net'\n"
-                "  export JIRA_USER_EMAIL='your-email@your-org.com'\n"
-                "  export JIRA_API_TOKEN='<your-atlassian-api-token>'\n"
-                "\n"
-                "Create an API token at: https://id.atlassian.com/manage-profile/security/api-tokens\n"
-                "\n"
-                "Add --no-ai to skip the AI step if no AI API key is set.\n"
-                "For a free AI option, set GROQ_API_KEY (see https://console.groq.com).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        if _check_jira_env():
+            _jira_env_error_and_exit()
 
         try:
             report = skill.analyze_ticket(
@@ -292,24 +396,38 @@ def main(argv=None):
         formatted = report.formatted_report
         flaky_count = len([m for m in report.flaky_metrics if m.flakiness_score != "Stable"])
 
+        print(formatted)
+
+        if args.output_file:
+            output_path = Path(args.output_file)
+            output_path.write_text(formatted, encoding="utf-8")
+            print(f"\nReport written to: {output_path}", file=sys.stderr)
+
+        if args.html_report:
+            html = render_html_report([report], title=f"Flaky Test Analysis – {args.jira_ticket}")
+            html_path = Path(args.html_report)
+            html_path.write_text(html, encoding="utf-8")
+            print(f"HTML report written to: {html_path}", file=sys.stderr)
+
+        sys.exit(1 if flaky_count > 0 else 0)
+
     # ----------------------------------------------------------------
     # Mode 1 – local file analysis
     # ----------------------------------------------------------------
-    else:
-        # Validate that all provided paths exist
-        missing = [p for p in args.robot_output if not Path(p).exists()]
-        if missing:
-            for p in missing:
-                print(f"ERROR: File not found: {p}", file=sys.stderr)
-            sys.exit(1)
+    # Validate that all provided paths exist
+    missing = [p for p in args.robot_output if not Path(p).exists()]
+    if missing:
+        for p in missing:
+            print(f"ERROR: File not found: {p}", file=sys.stderr)
+        sys.exit(1)
 
-        report = skill.run_analysis(
-            output_xml_paths=args.robot_output,
-            jira_issue_key=args.jira_issue,
-            use_ai_summary=not args.no_ai,
-        )
-        formatted = report.formatted_report
-        flaky_count = sum(1 for m in report.metrics if m.flakiness_score != "Stable")
+    report = skill.run_analysis(
+        output_xml_paths=args.robot_output,
+        jira_issue_key=args.jira_issue,
+        use_ai_summary=not args.no_ai,
+    )
+    formatted = report.formatted_report
+    flaky_count = sum(1 for m in report.metrics if m.flakiness_score != "Stable")
 
     print(formatted)
 
@@ -317,6 +435,12 @@ def main(argv=None):
         output_path = Path(args.output_file)
         output_path.write_text(formatted, encoding="utf-8")
         print(f"\nReport written to: {output_path}", file=sys.stderr)
+
+    if args.html_report:
+        html = markdown_wrap(formatted, title="Flaky Test Analysis")
+        html_path = Path(args.html_report)
+        html_path.write_text(html, encoding="utf-8")
+        print(f"HTML report written to: {html_path}", file=sys.stderr)
 
     # Exit with non-zero code if flaky tests were found
     sys.exit(1 if flaky_count > 0 else 0)

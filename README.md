@@ -58,7 +58,7 @@ An AI-powered skill that detects, analyses, and provides remediation guidance fo
 │       └── patterns/
 │           └── flaky_patterns.yaml # Built-in flaky pattern definitions
 └── tests/
-    ├── test_flaky_skill.py         # Unit + integration tests (79 tests)
+    ├── test_flaky_skill.py         # Unit + integration tests (144 tests)
     └── fixtures/
         ├── sample_output.xml       # Sample Robot Framework output (run 1)
         └── sample_output_run2.xml  # Sample Robot Framework output (run 2)
@@ -197,7 +197,7 @@ pytest tests/test_flaky_skill.py -v
 pytest tests/test_flaky_skill.py -v --cov=skills --cov-report=term-missing
 ```
 
-Expected output: **79 tests passed**.
+Expected output: **144 tests passed**.
 
 ---
 

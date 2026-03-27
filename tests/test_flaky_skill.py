@@ -745,14 +745,14 @@ class TestAnalyzeTicket:
             "**Root Cause:** The test relies on a real system clock.\n\n"
             "**Recommended Solution:** Use freezegun to freeze time in tests."
         )
-        rc, sol = FlakyTestAnalysisSkill._parse_ai_response(response)
+        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
         assert "real system clock" in rc
         assert "freezegun" in sol
 
     def test_parse_ai_response_fallback_when_no_labels(self):
         from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
         response = "The test is broken because of a timing issue."
-        rc, sol = FlakyTestAnalysisSkill._parse_ai_response(response)
+        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
         # Fallback: everything goes into root_cause
         assert "timing issue" in rc
         assert sol == ""
@@ -1172,7 +1172,7 @@ class TestAnthropicErrorHandling:
             )
 
         assert result[:2] == ("", "")
-        root_cause, recommended_solution, error_hint = result
+        root_cause, recommended_solution, code_snippet, error_hint = result
         assert error_hint  # billing error hint must be non-empty
 
     def test_auth_error_returns_empty_string(self, caplog):
@@ -1198,7 +1198,7 @@ class TestAnthropicErrorHandling:
             )
 
         assert result[:2] == ("", "")
-        root_cause, recommended_solution, error_hint = result
+        root_cause, recommended_solution, code_snippet, error_hint = result
         assert error_hint  # auth error hint must be non-empty
 
     def test_connection_error_returns_empty_tuple(self, caplog):
@@ -1223,7 +1223,7 @@ class TestAnthropicErrorHandling:
             )
 
         assert result[:2] == ("", "")
-        root_cause, recommended_solution, error_hint = result
+        root_cause, recommended_solution, code_snippet, error_hint = result
         assert error_hint  # connection error hint must be non-empty
 
     def test_ai_not_called_when_anthropic_unavailable(self):
@@ -1349,7 +1349,7 @@ class TestOpenAISupport:
 
         with patch.object(skill_module, "_openai", fake_openai, create=True), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True):
-            rc, sol, err = skill._generate_root_cause_analysis_openai(
+            rc, sol, snippet, err = skill._generate_root_cause_analysis_openai(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1376,7 +1376,7 @@ class TestOpenAISupport:
 
         with patch.object(skill_module, "_openai", fake_openai, create=True), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True):
-            rc, sol, err = skill._generate_root_cause_analysis_openai(
+            rc, sol, snippet, err = skill._generate_root_cause_analysis_openai(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1408,7 +1408,7 @@ class TestOpenAISupport:
 
         with patch.object(skill_module, "_openai", fake_openai, create=True), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True):
-            rc, sol, err = skill._generate_root_cause_analysis_openai(
+            rc, sol, snippet, err = skill._generate_root_cause_analysis_openai(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1448,10 +1448,10 @@ class TestOpenAISupport:
             )
 
         assert result[:2] == ("", "")
-        assert result[2]  # error_hint must be non-empty
+        assert result[3]  # error_hint must be non-empty (index 3 in 4-tuple)
 
     def test_root_cause_openai_returns_empty_on_auth_error(self, caplog):
-        """OpenAI 401 error is caught and returns ('', '', error_hint)."""
+        """OpenAI 401 error is caught and returns ('', '', '', error_hint)."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1472,10 +1472,10 @@ class TestOpenAISupport:
             )
 
         assert result[:2] == ("", "")
-        assert result[2]
+        assert result[3]  # error_hint must be non-empty (index 3 in 4-tuple)
 
     def test_root_cause_openai_returns_empty_when_package_missing(self):
-        """When _OPENAI_AVAILABLE is False the method returns ('', '', '')."""
+        """When _OPENAI_AVAILABLE is False the method returns ('', '', '', '')."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1489,7 +1489,7 @@ class TestOpenAISupport:
                 flaky_metrics=[],
             )
 
-        assert result == ("", "", "")
+        assert result == ("", "", "", "")
 
     # ------------------------------------------------------------------
     # analyze_ticket – OpenAI used when Anthropic not configured
@@ -1795,7 +1795,7 @@ class TestGroqSupport:
         skill = FlakyTestAnalysisSkill(groq_api_key="gsk-test")
         with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
              patch.object(skill_module, "_openai", fake_openai, create=True):
-            rc, sol, hint = skill._generate_root_cause_analysis_groq(
+            rc, sol, snippet, hint = skill._generate_root_cause_analysis_groq(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1823,7 +1823,7 @@ class TestGroqSupport:
         with caplog.at_level("ERROR"), \
              patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
              patch.object(skill_module, "_openai", fake_openai, create=True):
-            rc, sol, hint = skill._generate_root_cause_analysis_groq(
+            rc, sol, snippet, hint = skill._generate_root_cause_analysis_groq(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -1834,7 +1834,7 @@ class TestGroqSupport:
         assert "rate limit" in hint.lower()
 
     def test_groq_returns_empty_when_package_missing(self):
-        """When _OPENAI_AVAILABLE is False the Groq method returns ('', '', '')."""
+        """When _OPENAI_AVAILABLE is False the Groq method returns ('', '', '', '')."""
         from skills.flaky_test_analysis import FlakyTestAnalysisSkill
         import skills.flaky_test_analysis.skill as skill_module
 
@@ -1846,7 +1846,7 @@ class TestGroqSupport:
                 robot_runs=[],
                 flaky_metrics=[],
             )
-        assert result == ("", "", "")
+        assert result == ("", "", "", "")
 
     def test_groq_falls_back_on_model_not_found(self):
         """A 404 model-not-found triggers retry with the next fallback model."""
@@ -1879,7 +1879,7 @@ class TestGroqSupport:
         )
         with patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
              patch.object(skill_module, "_openai", fake_openai, create=True):
-            rc, sol, hint = skill._generate_root_cause_analysis_groq(
+            rc, sol, snippet, hint = skill._generate_root_cause_analysis_groq(
                 issue={"key": "X-1", "status": "Open", "summary": "Test"},
                 attachments=[],
                 robot_runs=[],
@@ -2076,3 +2076,407 @@ class TestBuildRootCausePrompt:
 
         assert "Manual triage" in prompt
         assert "Rerun confirmed" in prompt
+
+    def test_prompt_requests_code_snippet_section(self):
+        """The prompt must instruct the AI to produce a 'Code Snippet:' section."""
+        skill = self._make_skill()
+        issue = {
+            "key": "NCCF-3",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "comments": [],
+        }
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+        assert "Code Snippet" in prompt, (
+            "The prompt must request a Code Snippet section from the AI"
+        )
+
+
+# ===========================================================================
+# Feature: code snippet extraction from AI response
+# ===========================================================================
+
+class TestParseAiResponseCodeSnippet:
+    """Tests for _parse_ai_response – code-snippet extraction."""
+
+    def test_extracts_code_snippet_from_three_section_response(self):
+        """A response with all three sections returns correct 3-tuple."""
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+
+        response = (
+            "**Root Cause:** The test depends on system time.\n\n"
+            "**Recommended Solution:** Use a time-mocking library.\n\n"
+            "**Code Snippet:**\n"
+            "```python\n"
+            "from freezegun import freeze_time\n\n"
+            "@freeze_time('2024-01-01')\n"
+            "def test_example():\n"
+            "    assert True\n"
+            "```"
+        )
+        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+
+        assert "system time" in rc
+        assert "time-mocking" in sol
+        assert "freezegun" in snippet
+        assert "freeze_time" in snippet
+
+    def test_na_code_snippet_returns_empty_string(self):
+        """When the AI responds with 'N/A' for the code snippet, the field is empty."""
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+
+        response = (
+            "**Root Cause:** Config issue.\n\n"
+            "**Recommended Solution:** Update config file.\n\n"
+            "**Code Snippet:** N/A"
+        )
+        rc, sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+
+        assert "Config issue" in rc
+        assert snippet == ""
+
+    def test_missing_code_snippet_section_returns_empty_string(self):
+        """If the AI omits the Code Snippet section entirely, snippet is empty."""
+        from skills.flaky_test_analysis.skill import FlakyTestAnalysisSkill
+
+        response = (
+            "**Root Cause:** Network timeout.\n\n"
+            "**Recommended Solution:** Add retry logic."
+        )
+        _rc, _sol, snippet = FlakyTestAnalysisSkill._parse_ai_response(response)
+        assert snippet == ""
+
+    def test_code_snippet_is_stored_on_ticket_report(self):
+        """code_snippet returned by the AI is stored on the TicketAnalysisReport."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+        from unittest.mock import MagicMock, patch
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "NCCF-1",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "attachments": [],
+            "comments": [],
+        }
+        mock_jira.list_attachments.return_value = []
+
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Timer drift.\n\n"
+            "**Recommended Solution:** Use monotonic clock.\n\n"
+            "**Code Snippet:**\n"
+            "```python\nimport time\ntime.monotonic()\n```"
+        )
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-test", jira_client=mock_jira)
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "monotonic" in report.code_snippet or "time" in report.code_snippet
+
+    def test_code_snippet_appears_in_formatted_markdown_report(self):
+        """The formatted Markdown report includes a '## 💻 Code Snippet' section."""
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        import skills.flaky_test_analysis.skill as skill_module
+        from unittest.mock import MagicMock, patch
+
+        mock_jira = MagicMock()
+        mock_jira.get_issue.return_value = {
+            "key": "NCCF-1",
+            "summary": "Test",
+            "status": "Open",
+            "description": "",
+            "attachments": [],
+            "comments": [],
+        }
+        mock_jira.list_attachments.return_value = []
+
+        fake_openai = MagicMock()
+        choice = MagicMock()
+        choice.message.content = (
+            "**Root Cause:** Timer drift.\n\n"
+            "**Recommended Solution:** Fix it.\n\n"
+            "**Code Snippet:**\n```python\nx = 1\n```"
+        )
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value.choices = [choice]
+
+        skill = FlakyTestAnalysisSkill(openai_api_key="sk-test", jira_client=mock_jira)
+
+        with patch.object(skill_module, "_ANTHROPIC_AVAILABLE", False), \
+             patch.object(skill_module, "_OPENAI_AVAILABLE", True), \
+             patch.object(skill_module, "_openai", fake_openai, create=True):
+            report = skill.analyze_ticket("NCCF-1", use_ai=True, post_comment=False)
+
+        assert "💻 Code Snippet" in report.formatted_report
+
+
+# ===========================================================================
+# Feature: HTML report generation
+# ===========================================================================
+
+class TestHtmlReport:
+    """Tests for render_html_report and markdown_wrap."""
+
+    def _make_report(self, issue_key="NCCF-1", status="Open", root_cause="Timer drift",
+                     solution="Use monotonic.", snippet="```python\nx=1\n```"):
+        from skills.flaky_test_analysis import TicketAnalysisReport
+        return TicketAnalysisReport(
+            issue_key=issue_key,
+            summary=f"Test suite failure – {issue_key}",
+            status=status,
+            root_cause=root_cause,
+            recommended_solution=solution,
+            code_snippet=snippet,
+            formatted_report=f"# {issue_key}\n{root_cause}",
+        )
+
+    def test_render_html_report_is_valid_html(self):
+        """render_html_report returns a string containing standard HTML scaffolding."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report()
+        html = render_html_report([report])
+        assert "<!DOCTYPE html>" in html
+        assert "<html" in html
+        assert "</html>" in html
+
+    def test_render_html_report_contains_ticket_key(self):
+        """The HTML report must include the ticket key."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(issue_key="NCCF-999")
+        html = render_html_report([report])
+        assert "NCCF-999" in html
+
+    def test_render_html_report_contains_root_cause(self):
+        """The root cause text must appear in the HTML report."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(root_cause="The test depends on system time.")
+        html = render_html_report([report])
+        assert "system time" in html
+
+    def test_render_html_report_contains_code_snippet(self):
+        """The HTML report must include the code snippet."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(snippet="```python\nfrom freezegun import freeze_time\n```")
+        html = render_html_report([report])
+        assert "freezegun" in html
+        assert "Code Snippet" in html
+
+    def test_render_html_report_na_snippet_is_omitted(self):
+        """When code_snippet is 'N/A', the snippet section must not appear."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(snippet="N/A")
+        html = render_html_report([report])
+        assert "Code Snippet" not in html
+
+    def test_render_html_report_batch_summary_table(self):
+        """When multiple reports are provided, a summary table is rendered."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        reports = [
+            self._make_report(issue_key="NCCF-1", status="Open"),
+            self._make_report(issue_key="NCCF-2", status="Closed"),
+        ]
+        html = render_html_report(reports, title="Batch Analysis")
+        assert "NCCF-1" in html
+        assert "NCCF-2" in html
+        assert "2 tickets analysed" in html
+        assert "Batch Analysis" in html
+
+    def test_render_html_report_status_badge_closed(self):
+        """Closed tickets get a red status badge CSS class."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(status="Closed")
+        html = render_html_report([report])
+        assert "badge-closed" in html
+
+    def test_render_html_report_status_badge_open(self):
+        """Open tickets get a green status badge CSS class."""
+        from skills.flaky_test_analysis.html_report import render_html_report
+        report = self._make_report(status="Open")
+        html = render_html_report([report])
+        assert "badge-open" in html
+
+    def test_markdown_wrap_returns_html(self):
+        """markdown_wrap converts a Markdown string to an HTML document."""
+        from skills.flaky_test_analysis.html_report import markdown_wrap
+        md = "# Flaky Test Report\n\n## Summary\n\nNo flaky tests detected."
+        html = markdown_wrap(md, title="My Report")
+        assert "<!DOCTYPE html>" in html
+        assert "My Report" in html
+        assert "No flaky tests detected" in html
+
+    def test_html_report_is_exported_from_package(self):
+        """render_html_report and markdown_wrap must be importable from the package."""
+        from skills.flaky_test_analysis import render_html_report, markdown_wrap
+        assert callable(render_html_report)
+        assert callable(markdown_wrap)
+
+
+# ===========================================================================
+# Feature: batch Jira ticket analysis (--jira-tickets)
+# ===========================================================================
+
+class TestBatchJiraTickets:
+    """Tests for the --jira-tickets CLI mode."""
+
+    _FAKE_JIRA_ENV = {
+        "JIRA_BASE_URL": "https://example.atlassian.net",
+        "JIRA_USER_EMAIL": "ci@example.com",
+        "JIRA_API_TOKEN": "fake-token",
+    }
+
+    def _make_report(self, key="NCCF-1"):
+        mock_report = MagicMock()
+        mock_report.formatted_report = f"# Report for {key}\nDone."
+        mock_report.flaky_metrics = []
+        return mock_report
+
+    def test_jira_tickets_calls_analyze_ticket_for_each_key(self):
+        """--jira-tickets calls analyze_ticket once per ticket key."""
+        from run_flaky_analysis import main
+
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill, \
+             patch("run_flaky_analysis.render_html_report"):
+            MockSkill.return_value.analyze_ticket.side_effect = [
+                self._make_report("NCCF-1"),
+                self._make_report("NCCF-2"),
+            ]
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-tickets", "NCCF-1", "NCCF-2", "--no-ai", "--no-post"])
+            assert exc_info.value.code == 0
+
+        calls = MockSkill.return_value.analyze_ticket.call_args_list
+        called_keys = [c.kwargs["jira_issue_key"] for c in calls]
+        assert called_keys == ["NCCF-1", "NCCF-2"]
+
+    def test_jira_tickets_mutually_exclusive_with_jira_ticket(self):
+        """--jira-tickets and --jira-ticket together must exit with error."""
+        from run_flaky_analysis import main
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--jira-tickets", "NCCF-1", "--jira-ticket", "NCCF-2"])
+        assert exc_info.value.code == 1
+
+    def test_jira_tickets_mutually_exclusive_with_robot_output(self):
+        """--jira-tickets and --robot-output together must exit with error."""
+        from run_flaky_analysis import main
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--jira-tickets", "NCCF-1", "--robot-output", "file.xml"])
+        assert exc_info.value.code == 1
+
+    def test_jira_tickets_missing_env_exits_cleanly(self, capsys):
+        """--jira-tickets without Jira env vars exits with a friendly error."""
+        from run_flaky_analysis import main
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-tickets", "NCCF-1", "NCCF-2"])
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "JIRA_BASE_URL" in err
+
+    def test_jira_tickets_writes_html_report(self, tmp_path):
+        """When --html-report is given, an HTML file is written for batch tickets."""
+        from run_flaky_analysis import main
+
+        html_path = tmp_path / "report.html"
+
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill, \
+             patch("run_flaky_analysis.render_html_report", return_value="<html/>") as mock_render:
+            MockSkill.return_value.analyze_ticket.return_value = self._make_report("NCCF-1")
+            with pytest.raises(SystemExit):
+                main([
+                    "--jira-tickets", "NCCF-1",
+                    "--no-ai", "--no-post",
+                    "--html-report", str(html_path),
+                ])
+
+        mock_render.assert_called_once()
+        assert html_path.exists()
+        assert html_path.read_text() == "<html/>"
+
+    def test_jira_tickets_failed_ticket_continues(self, capsys):
+        """When one ticket fails, processing continues for remaining tickets."""
+        from run_flaky_analysis import main
+
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill, \
+             patch("run_flaky_analysis.render_html_report"):
+            MockSkill.return_value.analyze_ticket.side_effect = [
+                RuntimeError("Not found"),
+                self._make_report("NCCF-2"),
+            ]
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--jira-tickets", "NCCF-1", "NCCF-2", "--no-ai", "--no-post"])
+
+        # Should still call analyze_ticket for NCCF-2
+        assert MockSkill.return_value.analyze_ticket.call_count == 2
+        err = capsys.readouterr().err
+        assert "NCCF-1" in err  # error message must mention the failing ticket
+
+
+class TestHtmlReportCliFlag:
+    """Tests for --html-report CLI flag in single-ticket and local-file modes."""
+
+    _FAKE_JIRA_ENV = {
+        "JIRA_BASE_URL": "https://example.atlassian.net",
+        "JIRA_USER_EMAIL": "ci@example.com",
+        "JIRA_API_TOKEN": "fake-token",
+    }
+
+    def test_html_report_written_for_single_ticket(self, tmp_path):
+        """--html-report writes an HTML file in single-ticket mode."""
+        from run_flaky_analysis import main
+
+        html_path = tmp_path / "report.html"
+        mock_report = MagicMock()
+        mock_report.formatted_report = "# Done"
+        mock_report.flaky_metrics = []
+
+        with patch.dict("os.environ", self._FAKE_JIRA_ENV), \
+             patch("run_flaky_analysis.FlakyTestAnalysisSkill") as MockSkill, \
+             patch("run_flaky_analysis.render_html_report", return_value="<html/>") as mock_render:
+            MockSkill.return_value.analyze_ticket.return_value = mock_report
+            with pytest.raises(SystemExit):
+                main([
+                    "--jira-ticket", "NCCF-1",
+                    "--no-ai", "--no-post",
+                    "--html-report", str(html_path),
+                ])
+
+        mock_render.assert_called_once()
+        assert html_path.exists()
+
+    def test_html_report_written_for_robot_output(self, tmp_path):
+        """--html-report writes an HTML file in local robot-output mode."""
+        from run_flaky_analysis import main
+
+        html_path = tmp_path / "report.html"
+        xml_path = tmp_path / "output.xml"
+        # Create a minimal robot XML file
+        xml_path.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<robot generator="Robot" generated="20240101 00:00:00.000">'
+            '<suite name="S"><test name="T"><status status="PASS"/></test></suite>'
+            '<statistics/><errors/></robot>',
+            encoding="utf-8",
+        )
+
+        with patch("run_flaky_analysis.markdown_wrap", return_value="<html/>") as mock_wrap:
+            with pytest.raises(SystemExit):
+                main([
+                    "--robot-output", str(xml_path),
+                    "--no-ai",
+                    "--html-report", str(html_path),
+                ])
+
+        mock_wrap.assert_called_once()
+        assert html_path.exists()
