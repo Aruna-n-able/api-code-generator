@@ -345,7 +345,7 @@ const TAB_NAMES = {
   transformer:      {java:'Transformer',     python:'Transformer'},
   requestDto:       {java:'RequestDTO',      python:'RequestSchema'},
   responseDto:      {java:'ResponseDTO',     python:'ResponseSchema'},
-  apiClient:        {java:'API Client',      python:'API Client'},
+  apiClient:        {java:'SoapUI',      python:'API Client'},
   jsClient:         {java:'JS Client',       python:'JS Client'},
 };
 function tabLabel(t){ return TAB_NAMES[t][S.lang] }
@@ -358,7 +358,7 @@ function tabFilename(t,opName){
     transformer:     S.lang==='java'?p+'Transformer.java':sn+'_transformer.py',
     requestDto:      S.lang==='java'?p+'Request.java':sn+'_request.py',
     responseDto:     S.lang==='java'?p+'Response.java':sn+'_response.py',
-    apiClient:       S.lang==='java'?p+'ApiClient.java':sn+'_client.py',
+    apiClient:       S.lang==='java'?p+'SoapUI.java':sn+'_client.py',
     jsClient:        sn+'_client.js',
   };
   return map[t];

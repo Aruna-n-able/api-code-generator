@@ -296,6 +296,15 @@ def _java_builder_fields(fields: list[dict]) -> str:
     )
 
 
+def _java_set_fields(fields: list[dict]) -> str:
+    """Generate setter calls for a JAX-WS message object (no Lombok builder)."""
+    if not fields:
+        return "        // no fields to map"
+    return "\n".join(
+        f"        soapRequest.set{_pascal(f['name'])}(request.get{_pascal(f['name'])}());"
+        for f in fields
+    )
+
 def java_request_dto(op: dict, pkg: str) -> str:
     pascal = _pascal(op["name"])
     extra = _java_dto_imports(op["inputFields"])
@@ -370,19 +379,27 @@ def java_service_impl(op: dict, pkg: str) -> str:
     method = _http_method(op["name"])
     is_getter = method == "GET"
     param = "" if is_getter else f"{pascal}Request request"
-    soap_req = "" if is_getter else f"{pascal}SoapRequest soapRequest = transformer.toSoapRequest(request);\n        "
+    soap_req = "" if is_getter else f"{pascal}RequestMsg soapRequest = transformer.toSoapRequest(request);\n        "
     soap_arg = "" if is_getter else "soapRequest"
     log_req = "" if is_getter else " with request: {}"
     log_arg = "" if is_getter else ", request"
+    req_msg_import = (
+        f"\nimport com.nable.n_central.ncentral.ws.{pascal}RequestMsg;"
+        if not is_getter else ""
+    )
+    # Only import REST request DTO when it's actually used in the method signature
+    req_dto_import = (
+        f"import {pkg}.dto.{pascal}Request;\n"
+        if not is_getter else ""
+    )
     return (
         f"package {pkg}.service.impl;\n\n"
-        f"import {pkg}.dto.{pascal}Request;\n"
+        f"{req_dto_import}"
         f"import {pkg}.dto.{pascal}Response;\n"
+        f"import {pkg}.dto.{pascal}SoapUI;\n"
         f"import {pkg}.service.{pascal}Service;\n"
         f"import {pkg}.transformer.{pascal}Transformer;\n"
-        f"import com.ncentral.ncentral.client.NCentralSoapClient;\n"
-        f"import com.ncentral.ncentral.soap.{pascal}SoapRequest;\n"
-        f"import com.ncentral.ncentral.soap.{pascal}SoapResponse;\n"
+        f"import com.nable.n_central.ncentral.ws.{pascal}ResponseMsg;{req_msg_import}\n"
         f"import lombok.RequiredArgsConstructor;\n"
         f"import lombok.extern.slf4j.Slf4j;\n"
         f"import org.springframework.stereotype.Service;\n\n"
@@ -391,12 +408,12 @@ def java_service_impl(op: dict, pkg: str) -> str:
         f" */\n"
         f"@Slf4j\n@Service\n@RequiredArgsConstructor\n"
         f"public class {pascal}ServiceImpl implements {pascal}Service {{\n\n"
-        f"    private final NCentralSoapClient nCentralSoapClient;\n"
+        f"    private final {pascal}SoapUI soapClient;\n"
         f"    private final {pascal}Transformer transformer;\n\n"
         f"    @Override\n"
         f"    public {pascal}Response {camel}({param}) {{\n"
         f'        log.info("Executing {op["name"]}{log_req}"{log_arg});\n\n'
-        f"        {soap_req}{pascal}SoapResponse soapResponse = nCentralSoapClient.{camel}({soap_arg});\n\n"
+        f"        {soap_req}{pascal}ResponseMsg soapResponse = soapClient.{camel}({soap_arg});\n\n"
         f"        {pascal}Response response = transformer.toResponse(soapResponse);\n"
         f'        log.debug("{op["name"]} response: {{}}", response);\n'
         f"        return response;\n"
@@ -416,33 +433,45 @@ def java_transformer(op: dict, pkg: str) -> str:
         for f in op["outputFields"]
     ) or "            // map fields from soapResponse"
 
+    req_msg_import = (
+        f"\nimport com.nable.n_central.ncentral.ws.{pascal}RequestMsg;"
+        if not is_getter else ""
+    )
+    # Only import the REST request DTO when there's a toSoapRequest method
+    req_dto_import = (
+        f"import {pkg}.dto.{pascal}Request;\n"
+        if not is_getter else ""
+    )
+
     to_soap = "" if is_getter else (
         f"    /**\n"
-        f"     * Converts a REST request DTO to an N-Central SOAP request object.\n"
+        f"     * Converts a REST request DTO to a JAX-WS SOAP request message.\n"
         f"     */\n"
-        f"    public {pascal}SoapRequest toSoapRequest({pascal}Request request) {{\n"
-        f"        return {pascal}SoapRequest.builder()\n"
-        f"{in_map}\n"
-        f"                .build();\n"
+        f"    public {pascal}RequestMsg toSoapRequest({pascal}Request request) {{\n"
+        f"        {pascal}RequestMsg soapRequest = new {pascal}RequestMsg();\n"
+        f"{_java_set_fields(op['inputFields'])}\n"
+        f"        return soapRequest;\n"
         f"    }}\n\n"
     )
     return (
         f"package {pkg}.transformer;\n\n"
-        f"import {pkg}.dto.{pascal}Request;\n"
+        f"{req_dto_import}"
         f"import {pkg}.dto.{pascal}Response;\n"
-        f"import com.ncentral.ncentral.soap.{pascal}SoapRequest;\n"
-        f"import com.ncentral.ncentral.soap.{pascal}SoapResponse;\n"
+        f"import com.nable.n_central.ncentral.ws.{pascal}ResponseMsg;{req_msg_import}\n"
         f"import org.springframework.stereotype.Component;\n\n"
         f"/**\n"
         f" * Transformer for the {{@code {op['name']}}} operation.\n"
+        f" *\n"
+        f" * <p>Converts between the REST DTO layer and the JAX-WS generated\n"
+        f" * N-Central SOAP message types.</p>\n"
         f" */\n"
         f"@Component\n"
         f"public class {pascal}Transformer {{\n\n"
         f"{to_soap}"
         f"    /**\n"
-        f"     * Converts an N-Central SOAP response to a REST response DTO.\n"
+        f"     * Converts a JAX-WS SOAP response message to a REST response DTO.\n"
         f"     */\n"
-        f"    public {pascal}Response toResponse({pascal}SoapResponse soapResponse) {{\n"
+        f"    public {pascal}Response toResponse({pascal}ResponseMsg soapResponse) {{\n"
         f"        return {pascal}Response.builder()\n"
         f"{out_map}\n"
         f"                .build();\n"
@@ -504,86 +533,72 @@ def java_controller(op: dict, pkg: str) -> str:
     )
 
 
-def java_api_client(op: dict, pkg: str) -> str:
-    """Generate a Spring RestTemplate-based REST API client for the operation."""
+def java_soap_ui_client(op: dict, pkg: str) -> str:
+    """Generate a SoapUI-style direct SOAP client component for the operation.
+
+    Follows the pattern of DeviceAddSoapUI.java in the nable-nc/api-service
+    repository: a thin Spring @Component in the dto package that injects the
+    JAX-WS generated NcentralWebServicePortType and delegates each SOAP call
+    directly to the port type using the WSDL-generated message types.
+    """
     pascal = _pascal(op["name"])
     camel = _camel(op["name"])
     method = _http_method(op["name"])
     is_getter = method == "GET"
-    endpoint = f"/api/v1/{_kebab(op['name'])}"
 
-    method_annotation = {
-        "GET": "getForEntity",
-        "DELETE": "delete",
-        "POST": "postForEntity",
-        "PUT": "exchange",
-    }[method]
+    # Parameter and return for the SOAP method
+    soap_req_type = f"{pascal}RequestMsg"
+    soap_res_type = f"{pascal}ResponseMsg"
+    req_param = "" if is_getter else f"{soap_req_type} request"
+    soap_call = f"nCentralWS.{camel}({'' if is_getter else 'request'})"
 
-    if method == "GET":
-        http_call = (
-            f"        log.info(\"Calling {method} {endpoint}\");\n"
-            f"        ResponseEntity<{pascal}Response> response =\n"
-            f"                restTemplate.getForEntity(baseUrl + \"{endpoint}\", {pascal}Response.class);\n"
-            f"        return response.getBody();"
+    if is_getter:
+        method_body = (
+            f"        log.info(\"Invoking N-Central SOAP operation: {op['name']}\");\n"
+            f"        return {soap_call};"
         )
-    elif method == "DELETE":
-        http_call = (
-            f"        log.info(\"Calling {method} {endpoint}\");\n"
-            f"        restTemplate.delete(baseUrl + \"{endpoint}\");"
-        )
-    elif method == "POST":
-        http_call = (
-            f"        log.info(\"Calling {method} {endpoint} with request: {{}}\", request);\n"
-            f"        ResponseEntity<{pascal}Response> response =\n"
-            f"                restTemplate.postForEntity(baseUrl + \"{endpoint}\", request, {pascal}Response.class);\n"
-            f"        return response.getBody();"
-        )
-    else:  # PUT
-        http_call = (
-            f"        log.info(\"Calling {method} {endpoint} with request: {{}}\", request);\n"
-            f"        HttpEntity<{pascal}Request> entity = new HttpEntity<>(request);\n"
-            f"        ResponseEntity<{pascal}Response> response =\n"
-            f"                restTemplate.exchange(baseUrl + \"{endpoint}\", HttpMethod.PUT, entity, {pascal}Response.class);\n"
-            f"        return response.getBody();"
+    else:
+        method_body = (
+            f"        log.info(\"Invoking N-Central SOAP operation: {op['name']}\");\n"
+            f"        {soap_res_type} response = {soap_call};\n"
+            f"        log.debug(\"{op['name']} SOAP response: {{}}\", response);\n"
+            f"        return response;"
         )
 
-    return_type = "void" if method == "DELETE" else f"{pascal}Response"
-    req_param = "" if is_getter or method == "DELETE" else f"{pascal}Request request"
-    http_entity_import = "\nimport org.springframework.http.HttpEntity;" if method == "PUT" else ""
-    http_method_import = "\nimport org.springframework.http.HttpMethod;" if method == "PUT" else ""
-    response_entity_import = "\nimport org.springframework.http.ResponseEntity;" if method != "DELETE" else ""
-    request_dto_import = f"\nimport {pkg}.dto.{pascal}Request;" if not is_getter and method != "DELETE" else ""
-    response_dto_import = f"\nimport {pkg}.dto.{pascal}Response;" if method != "DELETE" else ""
+    req_import = (
+        f"\nimport com.nable.n_central.ncentral.ws.{pascal}RequestMsg;"
+        if not is_getter else ""
+    )
 
     return (
-        f"package {pkg}.client;\n\n"
+        f"package {pkg}.dto;\n\n"
+        f"import com.nable.n_central.ncentral.ws.NcentralWebServicePortType;{req_import}\n"
+        f"import com.nable.n_central.ncentral.ws.{pascal}ResponseMsg;\n"
         f"import lombok.RequiredArgsConstructor;\n"
         f"import lombok.extern.slf4j.Slf4j;\n"
-        f"import org.springframework.beans.factory.annotation.Value;\n"
-        f"import org.springframework.stereotype.Component;\n"
-        f"import org.springframework.web.client.RestTemplate;{http_entity_import}{http_method_import}{response_entity_import}{request_dto_import}{response_dto_import}\n\n"
+        f"import org.springframework.stereotype.Component;\n\n"
         f"/**\n"
-        f" * REST API client for the {{@code {op['name']}}} endpoint.\n"
+        f" * Direct SOAP client for the {{@code {op['name']}}} N-Central WSDL operation.\n"
         f" *\n"
-        f" * <p>Inject this bean to call the {op['name']} REST API from another\n"
-        f" * Spring component. Configure the server URL with the\n"
-        f" * {{@code api.base-url}} property.</p>\n"
+        f" * <p>This component delegates directly to the JAX-WS generated\n"
+        f" * {{@link NcentralWebServicePortType}} port type, making it the single\n"
+        f" * point of contact between the service layer and the N-Central SOAP API\n"
+        f" * for this operation.</p>\n"
+        f" *\n"
+        f" * <p>Follows the SoapUI client pattern used in the N-Central API service.</p>\n"
         f" */\n"
         f"@Slf4j\n"
         f"@Component\n"
         f"@RequiredArgsConstructor\n"
-        f"public class {pascal}ApiClient {{\n\n"
-        f"    private final RestTemplate restTemplate;\n\n"
-        f"    @Value(\"${{api.base-url:http://localhost:8080}}\")\n"
-        f"    private String baseUrl;\n\n"
+        f"public class {pascal}SoapUI {{\n\n"
+        f"    private final NcentralWebServicePortType nCentralWS;\n\n"
         f"    /**\n"
-        f"     * Calls the {op['name']} REST endpoint.\n"
-        f"     *\n"
-        + (f"     * @param request the request body\n     *\n" if not is_getter and method != "DELETE" else "")
-        + f"     * @return the {pascal}Response from the server\n"
+        f"     * Invokes the {{@code {op['name']}}} SOAP operation on the N-Central server.\n"
+        + (f"     *\n     * @param request the JAX-WS generated SOAP request message\n" if not is_getter else "")
+        + f"     * @return the JAX-WS generated SOAP response message\n"
         f"     */\n"
-        f"    public {return_type} {camel}({req_param}) {{\n"
-        f"{http_call}\n"
+        f"    public {soap_res_type} {camel}({req_param}) {{\n"
+        f"{method_body}\n"
         f"    }}\n}}\n"
     )
 
@@ -668,7 +683,7 @@ def java_generate_all(op: dict, pkg: str = "com.ncentral.api") -> dict:
         "serviceImpl": java_service_impl(op, pkg),
         "transformer": java_transformer(op, pkg),
         "controller": java_controller(op, pkg),
-        "apiClient": java_api_client(op, pkg),
+        "apiClient": java_soap_ui_client(op, pkg),
         "jsClient": js_api_client(op),
     }
 
@@ -689,7 +704,7 @@ def java_unit_tests(op: dict, pkg: str = "com.ncentral.api") -> str:
         "" if is_getter else
         f"when(transformer.toSoapRequest(any({pascal}Request.class))).thenReturn(soapRequest);\n        "
     )
-    soap_call_arg = "" if is_getter else f"any({pascal}SoapRequest.class)"
+    soap_call_arg = "" if is_getter else f"any({pascal}RequestMsg.class)"
     verify_req = (
         "" if is_getter else
         f"verify(transformer).toSoapRequest(request);\n        "
@@ -698,18 +713,21 @@ def java_unit_tests(op: dict, pkg: str = "com.ncentral.api") -> str:
     req_except = (
         "" if is_getter else
         f"{pascal}Request request = {pascal}Request.builder().build();\n        "
-        f"when(transformer.toSoapRequest(any())).thenReturn(new {pascal}SoapRequest());\n        "
+        f"when(transformer.toSoapRequest(any())).thenReturn(new {pascal}RequestMsg());\n        "
     )
     except_call = f"serviceImpl.{camel}()" if is_getter else f"serviceImpl.{camel}(request)"
     extra_line = "\n" + extra if extra else ""
+    req_msg_import = (
+        f"\nimport com.nable.n_central.ncentral.ws.{pascal}RequestMsg;"
+        if not is_getter else ""
+    )
     return (
         f"package {pkg}.service.impl;\n\n"
         f"import {pkg}.dto.{pascal}Request;\n"
         f"import {pkg}.dto.{pascal}Response;\n"
+        f"import {pkg}.dto.{pascal}SoapUI;\n"
         f"import {pkg}.transformer.{pascal}Transformer;\n"
-        f"import com.ncentral.ncentral.client.NCentralSoapClient;\n"
-        f"import com.ncentral.ncentral.soap.{pascal}SoapRequest;\n"
-        f"import com.ncentral.ncentral.soap.{pascal}SoapResponse;\n"
+        f"import com.nable.n_central.ncentral.ws.{pascal}ResponseMsg;{req_msg_import}\n"
         f"import org.junit.jupiter.api.DisplayName;\n"
         f"import org.junit.jupiter.api.Test;\n"
         f"import org.junit.jupiter.api.extension.ExtendWith;\n"
@@ -722,32 +740,33 @@ def java_unit_tests(op: dict, pkg: str = "com.ncentral.api") -> str:
         f"/** Unit tests for {{@link {pascal}ServiceImpl}}. */\n"
         f"@ExtendWith(MockitoExtension.class)\n"
         f"class {pascal}ServiceImplTest {{\n\n"
-        f"    @Mock\n    private NCentralSoapClient nCentralSoapClient;\n"
+        f"    @Mock\n    private {pascal}SoapUI soapClient;\n"
         f"    @Mock\n    private {pascal}Transformer transformer;\n"
         f"    @InjectMocks\n    private {pascal}ServiceImpl serviceImpl;\n\n"
         f"    @Test\n"
         f"    @DisplayName(\"{op['name']}: successful execution returns expected response\")\n"
         f"    void should_return_response_when_{camel}_succeeds() {{\n"
         f"        // Arrange\n"
-        f"        {req_arrange}{pascal}SoapRequest soapRequest = new {pascal}SoapRequest();\n"
-        f"        {pascal}SoapResponse soapResponse = new {pascal}SoapResponse();\n"
+        f"        {req_arrange}"
+        + (f"{pascal}RequestMsg soapRequest = new {pascal}RequestMsg();\n        " if not is_getter else "")
+        + f"{pascal}ResponseMsg soapResponse = new {pascal}ResponseMsg();\n"
         f"        {pascal}Response expectedResponse = {pascal}Response.builder()\n"
         f"{out_sample}\n"
         f"                .build();\n\n"
-        f"        {soap_req_stub}when(nCentralSoapClient.{camel}({soap_call_arg})).thenReturn(soapResponse);\n"
-        f"        when(transformer.toResponse(any({pascal}SoapResponse.class))).thenReturn(expectedResponse);\n\n"
+        f"        {soap_req_stub}when(soapClient.{camel}({soap_call_arg})).thenReturn(soapResponse);\n"
+        f"        when(transformer.toResponse(any({pascal}ResponseMsg.class))).thenReturn(expectedResponse);\n\n"
         f"        // Act\n"
         f"        {pascal}Response actual = {actual_call};\n\n"
         f"        // Assert\n"
         f"        assertThat(actual).isNotNull();\n"
         f"        assertThat(actual).usingRecursiveComparison().isEqualTo(expectedResponse);\n"
-        f"        {verify_req}verify(nCentralSoapClient).{camel}({'soapRequest' if not is_getter else ''});\n"
+        f"        {verify_req}verify(soapClient).{camel}({'soapRequest' if not is_getter else ''});\n"
         f"        verify(transformer).toResponse(soapResponse);\n"
         f"    }}\n\n"
         f"    @Test\n"
         f"    @DisplayName(\"{op['name']}: SOAP client exception propagates\")\n"
         f"    void should_propagate_exception_when_soap_client_throws() {{\n"
-        f"        {req_except}when(nCentralSoapClient.{camel}({'any()' if not is_getter else ''})).thenThrow(new RuntimeException(\"SOAP fault\"));\n\n"
+        f"        {req_except}when(soapClient.{camel}({'any()' if not is_getter else ''})).thenThrow(new RuntimeException(\"SOAP fault\"));\n\n"
         f"        org.junit.jupiter.api.Assertions.assertThrows(\n"
         f"                RuntimeException.class,\n"
         f"                () -> {except_call});\n"
