@@ -21,16 +21,45 @@ Supported free LLM providers
 • Gemini   — free cloud tier (Gemini 1.5 Flash), free API key from
              https://aistudio.google.com
 • OpenAI   — paid (kept for compatibility)
+
+GitHub access (private reference repo)
+───────────────────────────────────────
+Set the following environment variables (or add them to a .env file) to
+allow the app to browse the private nable-nc/api-service reference repository:
+
+    GITHUB_USERNAME=<your-github-username>
+    GITHUB_TOKEN=<your-personal-access-token>
+
+The token needs read-only access to the target organisation's repositories
+(repo scope or the fine-grained "Contents: Read" permission).
+Credentials are used only server-side and are never sent to the browser.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from flask import Flask, request, jsonify, send_from_directory
 
+# ── Load .env file when python-dotenv is available (local development) ────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed — rely on real environment variables
+
 app = Flask(__name__, static_folder="static")
+
+# ── GitHub credentials (read once at startup) ─────────────────────────────────
+_GH_USERNAME: str = os.environ.get("GITHUB_USERNAME", "").strip()
+_GH_TOKEN:    str = os.environ.get("GITHUB_TOKEN", "").strip()
+
+# Default reference repository (can be overridden per request)
+_GH_REF_OWNER: str = "nable-nc"
+_GH_REF_REPO:  str = "api-service"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WSDL Parser
@@ -1559,6 +1588,132 @@ def api_ai_tests():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GitHub API proxy — authenticated access to the reference repository
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _gh_api(path: str) -> dict | list:
+    """Make an authenticated GET request to the GitHub REST API.
+
+    Uses the GITHUB_USERNAME and GITHUB_TOKEN environment variables for
+    HTTP Basic authentication so the private nable-nc/api-service repository
+    is accessible.  Credentials never leave the server.
+
+    Args:
+        path: API path, e.g. '/repos/nable-nc/api-service/contents/services'.
+
+    Returns:
+        Parsed JSON response (dict or list).
+
+    Raises:
+        urllib.error.HTTPError: On 4xx/5xx responses.
+        RuntimeError: When credentials are not configured.
+    """
+    if not _GH_TOKEN:
+        raise RuntimeError(
+            "GitHub credentials are not configured. "
+            "Set GITHUB_USERNAME and GITHUB_TOKEN environment variables."
+        )
+
+    import base64  # stdlib, always available
+    url = f"https://api.github.com{path}"
+    credentials = f"{_GH_USERNAME}:{_GH_TOKEN}".encode()
+    auth_header = "Basic " + base64.b64encode(credentials).decode()
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": auth_header,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "api-code-generator/1.0",
+        },
+    )
+    import json as _json  # noqa: PLC0415
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return _json.loads(resp.read().decode())
+
+
+@app.get("/api/github/status")
+def github_status():
+    """Return whether GitHub credentials are configured (no secrets exposed)."""
+    configured = bool(_GH_TOKEN)
+    return jsonify({
+        "configured": configured,
+        "username":   _GH_USERNAME if configured else "",
+        "refOwner":   _GH_REF_OWNER,
+        "refRepo":    _GH_REF_REPO,
+    })
+
+
+@app.post("/api/github/browse")
+def github_browse():
+    """Browse files in the reference GitHub repository.
+
+    Request body (JSON):
+        path  (str)  — repository-relative path, e.g. 'services/device/src'
+        owner (str)  — repository owner (defaults to nable-nc)
+        repo  (str)  — repository name (defaults to api-service)
+
+    Response:
+        On directory: list of {name, type ('file'|'dir'), path, size?}
+        On file:      {name, path, content (UTF-8 decoded), size, encoding}
+        On error:     {error: message}, HTTP 4xx/500
+    """
+    body  = request.get_json(silent=True) or {}
+    owner = (body.get("owner") or _GH_REF_OWNER).strip()
+    repo  = (body.get("repo")  or _GH_REF_REPO).strip()
+    path  = (body.get("path")  or "").strip().lstrip("/")
+
+    api_path = f"/repos/{owner}/{repo}/contents/{path}"
+
+    try:
+        data = _gh_api(api_path)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except urllib.error.HTTPError as exc:
+        msg = f"GitHub API error {exc.code}: {exc.reason}"
+        try:
+            import json as _json  # noqa: PLC0415
+            detail = _json.loads(exc.read().decode()).get("message", "")
+            if detail:
+                msg = f"{msg} — {detail}"
+        except Exception:  # noqa: BLE001
+            pass
+        return jsonify({"error": msg}), exc.code if exc.code < 600 else 500  # noqa: PLR2004
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+    # Directory listing
+    if isinstance(data, list):
+        entries = [
+            {
+                "name": e["name"],
+                "type": e["type"],   # 'file' | 'dir'
+                "path": e["path"],
+                "size": e.get("size"),
+            }
+            for e in sorted(data, key=lambda e: (e["type"] != "dir", e["name"].lower()))
+        ]
+        return jsonify({"type": "dir", "path": path, "entries": entries})
+
+    # Single file — decode content (GitHub returns base64)
+    if isinstance(data, dict) and data.get("type") == "file":
+        import base64 as _b64  # noqa: PLC0415
+        raw = data.get("content", "")
+        # GitHub base64-encodes with newlines embedded; strip them first
+        decoded = _b64.b64decode(raw.replace("\n", "")).decode("utf-8", errors="replace")
+        return jsonify({
+            "type":    "file",
+            "name":    data["name"],
+            "path":    data["path"],
+            "size":    data.get("size", 0),
+            "content": decoded,
+        })
+
+    return jsonify({"error": "Unexpected response from GitHub API"}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1568,3 +1723,4 @@ if __name__ == "__main__":
     print(f"\n  N-Central API Code Generator")
     print(f"  ► Open http://localhost:{port}\n")
     app.run(host="0.0.0.0", port=port, debug=debug)
+

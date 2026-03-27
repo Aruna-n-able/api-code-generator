@@ -254,9 +254,57 @@ code{font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:12
     </div>
 
   </div>
+
+  <!-- ── GitHub reference repo access ───────────────────────────────────────── -->
+  <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+  <div style="display:flex;flex-direction:column;gap:10px;max-width:520px">
+    <label style="font-size:12px;color:var(--muted)">Reference Repository (nable-nc/api-service)</label>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span id="ghStatusBadge" style="font-size:12px;padding:3px 8px;border-radius:999px;background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.3)">
+        ⚠ Not configured
+      </span>
+      <span id="ghStatusUser" style="font-size:11px;color:var(--dim)"></span>
+      <button class="btn" id="ghBrowseBtn" onclick="openGhBrowser()" disabled title="Configure GitHub credentials to browse">
+        📂 Browse Reference Repo
+      </button>
+    </div>
+    <p style="font-size:11px;color:var(--dim);margin:0">
+      Set <code style="font-size:11px">GITHUB_USERNAME</code> and <code style="font-size:11px">GITHUB_TOKEN</code>
+      in your <code style="font-size:11px">.env</code> file (copy from <code style="font-size:11px">.env.example</code>)
+      to browse the private reference repository and copy patterns into your generated code.
+    </p>
+  </div>
 </div>
 
-<!-- ── LAYOUT ─────────────────────────────────────────────────────────────────── -->
+<!-- ── GITHUB BROWSER MODAL ───────────────────────────────────────────────── -->
+<div id="ghBrowserModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:min(820px,96vw);max-height:86vh;display:flex;flex-direction:column;overflow:hidden">
+    <!-- Modal header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border)">
+      <div>
+        <span style="font-weight:600;font-size:15px">📦 nable-nc / api-service</span>
+        <span id="ghBreadcrumb" style="font-size:12px;color:var(--dim);margin-left:10px"></span>
+      </div>
+      <button class="btn" onclick="closeGhBrowser()">✕ Close</button>
+    </div>
+    <!-- Body: split into file list + preview -->
+    <div style="display:flex;flex:1;overflow:hidden;min-height:0">
+      <!-- File list -->
+      <div id="ghFileList" style="width:260px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;padding:8px 0;font-size:13px">
+        <p style="padding:8px 12px;color:var(--dim)">Loading…</p>
+      </div>
+      <!-- File content preview -->
+      <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+        <div id="ghPreviewBar" style="display:none;padding:6px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0">
+          <span id="ghPreviewName" style="font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <button class="btn" onclick="ghCopyContent()">📋 Copy</button>
+        </div>
+        <pre id="ghPreviewCode" style="flex:1;overflow:auto;margin:0;padding:16px;font-size:12px;line-height:1.6;white-space:pre;background:transparent;color:var(--text)"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="layout">
 
   <!-- ── SIDEBAR ──────────────────────────────────────────────────────────────── -->
@@ -643,7 +691,128 @@ function toggleSettings(){
     setProvider(S.provider);
     document.getElementById('ollamaUrlInput').value=S.ollamaUrl;
     document.getElementById('modelInput').value=S.model;
+    // refresh GitHub status each time the settings panel opens
+    refreshGhStatus();
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GitHub reference repo browser
+// ─────────────────────────────────────────────────────────────────────────────
+let _ghPath = '';  // current browsed directory path
+let _ghContent = ''; // current file content (for copy)
+
+async function refreshGhStatus(){
+  try{
+    const r = await fetch('/api/github/status');
+    const d = await r.json();
+    const badge = document.getElementById('ghStatusBadge');
+    const user  = document.getElementById('ghStatusUser');
+    const btn   = document.getElementById('ghBrowseBtn');
+    if(!badge) return;
+    if(d.configured){
+      badge.style.background='rgba(16,185,129,.15)';
+      badge.style.color='#6ee7b7';
+      badge.style.borderColor='rgba(16,185,129,.3)';
+      badge.textContent='✅ Connected';
+      user.textContent = d.username ? `as ${d.username}` : '';
+      btn.disabled=false;
+      btn.title='Browse '+d.refOwner+'/'+d.refRepo;
+    } else {
+      badge.style.background='rgba(239,68,68,.15)';
+      badge.style.color='#fca5a5';
+      badge.style.borderColor='rgba(239,68,68,.3)';
+      badge.textContent='⚠ Not configured';
+      user.textContent='';
+      btn.disabled=true;
+      btn.title='Configure GitHub credentials to browse';
+    }
+  } catch(_){}
+}
+
+async function openGhBrowser(){
+  const modal = document.getElementById('ghBrowserModal');
+  modal.style.display='flex';
+  await ghNavigate('');
+}
+
+function closeGhBrowser(){
+  document.getElementById('ghBrowserModal').style.display='none';
+}
+
+async function ghNavigate(path){
+  _ghPath = path;
+  const crumb = document.getElementById('ghBreadcrumb');
+  crumb.textContent = path ? '/ '+path.replace(/\//g,' / ') : '/ (root)';
+
+  const list = document.getElementById('ghFileList');
+  list.innerHTML='<p style="padding:8px 12px;color:var(--dim)">Loading…</p>';
+  document.getElementById('ghPreviewCode').textContent='';
+  document.getElementById('ghPreviewName').textContent='';
+  document.getElementById('ghPreviewBar').style.display='none';
+
+  try{
+    const res = await post('/api/github/browse', {path});
+    if(res.error){ list.innerHTML=`<p style="padding:8px 12px;color:#fca5a5">${esc(res.error)}</p>`; return; }
+
+    if(res.type==='dir'){
+      list.innerHTML = res.entries.map(e=>`
+        <div onclick="ghClickEntry('${esc(e.path)}','${esc(e.type)}')"
+             style="display:flex;align-items:center;gap:6px;padding:5px 12px;cursor:pointer;border-radius:4px;margin:1px 4px"
+             onmouseover="this.style.background='rgba(255,255,255,.06)'"
+             onmouseout="this.style.background=''"
+             title="${esc(e.path)}">
+          <span>${e.type==='dir'?'📁':'📄'}</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.name)}</span>
+        </div>`).join('');
+
+      // add "up" link when not at root
+      if(path){
+        const parent = path.includes('/')?path.substring(0,path.lastIndexOf('/')):'';
+        list.innerHTML = `
+          <div onclick="ghNavigate('${esc(parent)}')"
+               style="display:flex;align-items:center;gap:6px;padding:5px 12px;cursor:pointer;border-radius:4px;margin:1px 4px;color:var(--dim)"
+               onmouseover="this.style.background='rgba(255,255,255,.06)'"
+               onmouseout="this.style.background=''">
+            ↩ ..
+          </div>` + list.innerHTML;
+      }
+    } else if(res.type==='file'){
+      _ghContent = res.content;
+      document.getElementById('ghPreviewBar').style.display='flex';
+      document.getElementById('ghPreviewName').textContent=res.path;
+      document.getElementById('ghPreviewCode').textContent=res.content;
+    }
+  } catch(e){
+    list.innerHTML=`<p style="padding:8px 12px;color:#fca5a5">Error: ${esc(e.message)}</p>`;
+  }
+}
+
+async function ghClickEntry(path, type){
+  if(type==='dir'){
+    await ghNavigate(path);
+  } else {
+    // show file in preview pane
+    const list = document.getElementById('ghFileList');
+    document.getElementById('ghPreviewCode').textContent='Loading…';
+    document.getElementById('ghPreviewBar').style.display='flex';
+    document.getElementById('ghPreviewName').textContent=path;
+    try{
+      const res = await post('/api/github/browse',{path});
+      if(res.error){
+        document.getElementById('ghPreviewCode').textContent='Error: '+res.error;
+      } else {
+        _ghContent = res.content||'';
+        document.getElementById('ghPreviewCode').textContent=_ghContent;
+      }
+    } catch(e){
+      document.getElementById('ghPreviewCode').textContent='Error: '+e.message;
+    }
+  }
+}
+
+async function ghCopyContent(){
+  await doCopy(_ghContent, null);
 }
 
 function setLang(l){
