@@ -1,5 +1,5 @@
 """
-skill.py – Claude-powered Flaky Test Analysis Skill.
+skill.py – AI-powered Flaky Test Analysis Skill (Anthropic Claude or OpenAI).
 
 This module is the top-level orchestrator.  It wires together:
   1. RobotOutputParser  – parse output.xml artefacts
