@@ -2008,3 +2008,71 @@ class TestGroqSupport:
 
         _, kwargs = MockSkill.call_args
         assert kwargs.get("groq_model") == "llama-3.3-70b-versatile"
+
+
+class TestBuildRootCausePrompt:
+    """Tests for _build_root_cause_prompt, shared by all AI providers."""
+
+    def _make_skill(self):
+        from skills.flaky_test_analysis import FlakyTestAnalysisSkill
+        return FlakyTestAnalysisSkill()
+
+    def test_auto_generated_comments_are_excluded_from_prompt(self):
+        """
+        Previously posted auto-generated comments must not appear in the AI
+        prompt.  When both Anthropic and OpenAI fail the skill posts a comment
+        such as "AI analysis unavailable …\n_Analysis generated automatically
+        by the Flaky Test Analysis Skill._".  If that comment is fed back to
+        Groq on a subsequent run, the model confuses the billing error message
+        for the actual root cause.
+        """
+        from skills.flaky_test_analysis.skill import _SKILL_COMMENT_MARKER
+
+        skill = self._make_skill()
+        auto_comment = (
+            "# Root Cause Analysis – NCCF-1\n"
+            "_AI analysis unavailable (billing error – OpenAI quota exceeded)._\n"
+            "---\n"
+            f"{_SKILL_COMMENT_MARKER}"
+        )
+        issue = {
+            "key": "NCCF-1",
+            "summary": "Two_Factor_Authentication suite failure",
+            "status": "Closed",
+            "description": "Robot Framework test run failed.",
+            "comments": [
+                "First comment from a human",
+                auto_comment,
+            ],
+        }
+
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+
+        assert _SKILL_COMMENT_MARKER not in prompt, (
+            "Auto-generated skill comment must be filtered out of the AI prompt"
+        )
+        assert "First comment from a human" in prompt, (
+            "Non-auto-generated comments should still appear in the prompt"
+        )
+        assert "OpenAI quota exceeded" not in prompt, (
+            "Billing error text from a prior auto-generated comment must not reach the LLM"
+        )
+
+    def test_human_comments_are_included_in_prompt(self):
+        """Regular (non-auto-generated) comments must still be included."""
+        skill = self._make_skill()
+        issue = {
+            "key": "NCCF-2",
+            "summary": "Login suite failure",
+            "status": "Open",
+            "description": "",
+            "comments": [
+                "Manual triage: looks like a network timeout.",
+                "Rerun confirmed it fails consistently.",
+            ],
+        }
+
+        prompt = skill._build_root_cause_prompt(issue, [], [], [])
+
+        assert "Manual triage" in prompt
+        assert "Rerun confirmed" in prompt

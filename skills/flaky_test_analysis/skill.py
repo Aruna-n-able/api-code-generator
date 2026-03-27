@@ -70,6 +70,12 @@ _OPENAI_FALLBACK_MODELS: List[str] = ["gpt-4o-mini", "gpt-3.5-turbo"]
 _GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
 _GROQ_FALLBACK_MODELS: List[str] = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
+# Footer appended to every comment posted by this skill.
+# Used to identify and skip our own previously-posted comments when building
+# the AI prompt so the LLM does not treat a prior "AI unavailable" message as
+# evidence of the actual root cause.
+_SKILL_COMMENT_MARKER: str = "_Analysis generated automatically by the Flaky Test Analysis Skill._"
+
 
 def _is_openai_model_not_found(exc: Exception) -> bool:
     """Return True when *exc* indicates the requested OpenAI model is unavailable."""
@@ -1091,7 +1097,12 @@ class FlakyTestAnalysisSkill:
                 "",
             ]
 
-        comments = issue.get("comments", [])
+        # Exclude auto-generated comments posted by this skill itself so the LLM
+        # does not mistake a previous "AI unavailable" message for the root cause.
+        comments = [
+            c for c in issue.get("comments", [])
+            if _SKILL_COMMENT_MARKER not in c
+        ]
         if comments:
             prompt_lines += ["**Recent Comments:**", ""]
             for comment in comments[-3:]:  # Last 3 comments
@@ -1479,6 +1490,6 @@ class FlakyTestAnalysisSkill:
 
         lines += [
             "---",
-            "_Analysis generated automatically by the Flaky Test Analysis Skill._",
+            _SKILL_COMMENT_MARKER,
         ]
         return "\n".join(lines)
