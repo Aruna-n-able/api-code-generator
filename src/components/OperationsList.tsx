@@ -9,12 +9,15 @@ interface Props {
 
 /** Colour badge based on inferred HTTP method */
 function methodBadge(name: string) {
-  const n = name.toLowerCase();
-  if (n.startsWith('get') || n.startsWith('list') || n.startsWith('find') || n.startsWith('fetch') || n.startsWith('query') || n.startsWith('search'))
+  // Split camelCase into lowercase tokens: "deviceGetAll" → {"device","get","all"}
+  const tokens = new Set(
+    name.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '').split('_').filter(Boolean)
+  );
+  if (tokens.has('get') || tokens.has('list') || tokens.has('find') || tokens.has('fetch') || tokens.has('query') || tokens.has('search'))
     return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-400 border border-emerald-700/50">GET</span>;
-  if (n.startsWith('delete') || n.startsWith('remove'))
+  if (tokens.has('delete') || tokens.has('remove'))
     return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-red-900/60 text-red-400 border border-red-700/50">DEL</span>;
-  if (n.startsWith('update') || n.startsWith('modify') || n.startsWith('change') || n.startsWith('set'))
+  if (tokens.has('update') || tokens.has('modify') || tokens.has('change') || tokens.has('set'))
     return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-400 border border-amber-700/50">PUT</span>;
   return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-900/60 text-blue-400 border border-blue-700/50">POST</span>;
 }

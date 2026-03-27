@@ -24,10 +24,15 @@ function toCamel(name: string): string {
  * its name prefix.
  */
 function httpMethod(opName: string): 'GET' | 'POST' | 'PUT' | 'DELETE' {
-  const lower = opName.toLowerCase();
-  if (lower.startsWith('get') || lower.startsWith('list') || lower.startsWith('find') || lower.startsWith('fetch') || lower.startsWith('query') || lower.startsWith('search')) return 'GET';
-  if (lower.startsWith('delete') || lower.startsWith('remove')) return 'DELETE';
-  if (lower.startsWith('update') || lower.startsWith('modify') || lower.startsWith('change') || lower.startsWith('set')) return 'PUT';
+  // Split camelCase into lowercase word tokens for segment-level matching.
+  // Handles both prefix-based names (getDevice) and noun-first compound names
+  // common in N-Central WSDL (deviceGetAll, serverList, organizationFind, etc.).
+  const tokens = new Set(
+    opName.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '').split('_').filter(Boolean)
+  );
+  if (tokens.has('get') || tokens.has('list') || tokens.has('find') || tokens.has('fetch') || tokens.has('query') || tokens.has('search')) return 'GET';
+  if (tokens.has('delete') || tokens.has('remove')) return 'DELETE';
+  if (tokens.has('update') || tokens.has('modify') || tokens.has('change') || tokens.has('set')) return 'PUT';
   return 'POST';
 }
 

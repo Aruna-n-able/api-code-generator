@@ -251,13 +251,31 @@ def _snake(name: str) -> str:
 
 
 def _http_method(op_name: str) -> str:
+    """Infer the REST HTTP verb from a WSDL operation name.
+
+    Handles both prefix-based names (getDevice) and noun-first compound names
+    common in N-Central WSDL (deviceGet, deviceGetAll, serverList, etc.) by
+    splitting the camelCase name into word tokens and checking each one.
+    """
+    # Break camelCase into lowercase word tokens so segment-level matching works.
+    # "deviceGetAll" → {"device","get","all"}, "serverList" → {"server","list"}.
+    tokens = set(
+        re.sub(r"([A-Z])", lambda m: "_" + m.group(1).lower(), op_name).lstrip("_").split("_")
+    )
     lower = op_name.lower()
-    if any(lower.startswith(p) for p in ("get", "list", "find", "fetch", "query", "search")):
+
+    get_words = {"get", "list", "find", "fetch", "query", "search"}
+    if any(lower.startswith(p) for p in get_words) or tokens & get_words:
         return "GET"
-    if any(lower.startswith(p) for p in ("delete", "remove")):
+
+    del_words = {"delete", "remove"}
+    if any(lower.startswith(p) for p in del_words) or tokens & del_words:
         return "DELETE"
-    if any(lower.startswith(p) for p in ("update", "modify", "change", "set")):
+
+    put_words = {"update", "modify", "change", "set"}
+    if any(lower.startswith(p) for p in put_words) or tokens & put_words:
         return "PUT"
+
     return "POST"
 
 
@@ -704,8 +722,30 @@ def js_api_client(op: dict) -> str:
     )
 
 
-def java_generate_all(op: dict, pkg: str = "com.ncentral.api") -> dict:
-    return {
+def _extract_ws_package(ref_content: str) -> str:
+    """Extract the JAX-WS stub package from a reference Java file.
+
+    Looks for an import of ``NcentralWebServicePortType`` and returns the
+    package prefix (everything before ``.NcentralWebServicePortType``).
+
+    Args:
+        ref_content: Raw Java source of a reference file from the api-service repo.
+
+    Returns:
+        The WS package string, e.g. ``com.nable.ncentral.ws``, or empty string
+        when the import cannot be found.
+    """
+    if not ref_content:
+        return ""
+    for line in ref_content.splitlines():
+        m = re.match(r"\s*import\s+([\w.]+)\.NcentralWebServicePortType\s*;", line)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def java_generate_all(op: dict, pkg: str = "com.ncentral.api", ref_content: str = "") -> dict:
+    files = {
         "requestDto": java_request_dto(op, pkg),
         "responseDto": java_response_dto(op, pkg),
         "serviceInterface": java_service_interface(op, pkg),
@@ -715,6 +755,12 @@ def java_generate_all(op: dict, pkg: str = "com.ncentral.api") -> dict:
         "apiClient": java_soap_ui_client(op, pkg),
         "jsClient": js_api_client(op),
     }
+    # When a reference file from the api-service repo is provided, extract the
+    # actual WS stub package and replace the hardcoded default in every file.
+    ws_pkg = _extract_ws_package(ref_content)
+    if ws_pkg:
+        files = {k: v.replace("com.nable.n_central.ncentral.ws", ws_pkg) for k, v in files.items()}
+    return files
 
 
 def java_unit_tests(op: dict, pkg: str = "com.ncentral.api") -> str:
@@ -1388,10 +1434,11 @@ def api_generate():
     op = body.get("operation")
     lang = body.get("language", "java")
     pkg = body.get("package", "com.ncentral.api")
+    ref_content = (body.get("refContent") or "").strip()
     if not op:
         return jsonify({"error": "Missing 'operation' field"}), 400
     try:
-        files = py_generate_all(op) if lang == "python" else java_generate_all(op, pkg)
+        files = py_generate_all(op) if lang == "python" else java_generate_all(op, pkg, ref_content)
         return jsonify({"files": files})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
@@ -1486,6 +1533,7 @@ def api_ai_refine():
     files        = body.get("files", {})
     lang         = body.get("language", "java")
     user_message = body.get("userMessage", "")
+    ref_content  = (body.get("refContent") or "").strip()
 
     try:
         client, model_default = _build_llm_client(provider, api_key, ollama_url)
@@ -1518,7 +1566,13 @@ def api_ai_refine():
         tag = "python"
 
     code_ctx = "\n".join(f"```{tag}:{k}\n{v}\n```" for k, v in files.items())
-    full_system = f'{system}\n\nCurrent files for operation "{op_name}":\n{code_ctx}'
+    ref_section = (
+        f"\n\nReference file from the nable-nc/api-service repository "
+        f"(align generated code with its patterns, package names, and conventions):\n"
+        f"```java\n{ref_content}\n```"
+        if ref_content else ""
+    )
+    full_system = f'{system}{ref_section}\n\nCurrent files for operation "{op_name}":\n{code_ctx}'
 
     messages = [{"role": "system", "content": full_system}]
     for m in history:

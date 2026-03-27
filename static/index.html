@@ -313,6 +313,7 @@ code{font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:12
       <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
         <div id="ghPreviewBar" style="display:none;padding:6px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0">
           <span id="ghPreviewName" style="font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <button class="btn btn-green" onclick="ghUseAsRef()" title="Pin this file as reference — the code generator will align imports and patterns with it">📌 Use as Reference</button>
           <button class="btn" onclick="ghCopyContent()">📋 Copy</button>
         </div>
         <pre id="ghPreviewCode" style="flex:1;overflow:auto;margin:0;padding:16px;font-size:12px;line-height:1.6;white-space:pre;background:transparent;color:var(--text)"></pre>
@@ -375,6 +376,7 @@ const S = {
   stage:     'idle', // 'idle'|'generating'|'generated'|'satisfied'
   files:     null,   // {requestDto,responseDto,serviceInterface,serviceImpl,transformer,controller}
   chat:      [],     // [{role,content}]
+  ghRef:     {path:'', content:''},  // reference file pinned from the api-service repo
   // LLM provider settings
   provider:  'ollama',              // 'ollama'|'groq'|'gemini'|'openai'
   apiKey:    '',                    // API key for cloud providers
@@ -538,7 +540,10 @@ function renderOpView(){
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
         <h2 style="font-size:15px;font-weight:600;color:#fff">${esc(op.name)}</h2>
-        <span class="badge">${langLabel()}</span>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          ${S.ghRef.content?`<span style="font-size:11px;padding:3px 8px;border-radius:999px;background:rgba(16,185,129,.15);color:#6ee7b7;border:1px solid rgba(16,185,129,.3);display:inline-flex;align-items:center;gap:4px">📌 ${esc(S.ghRef.path.split('/').pop())}<button onclick="S.ghRef={path:'',content:''};render()" style="background:none;border:none;cursor:pointer;color:inherit;padding:0;margin-left:2px;line-height:1" title="Clear reference">✕</button></span>`:''}
+          <span class="badge">${langLabel()}</span>
+        </div>
       </div>
       ${op.documentation?`<p style="font-size:12px;color:var(--dim);margin-bottom:12px">${esc(op.documentation)}</p>`:''}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
@@ -869,6 +874,21 @@ async function ghCopyContent(){
   await doCopy(_ghContent, null);
 }
 
+function ghUseAsRef(){
+  const path = document.getElementById('ghPreviewName').textContent;
+  S.ghRef = {path, content: _ghContent};
+  // Flash confirmation in the preview bar
+  const bar = document.getElementById('ghPreviewBar');
+  const old = bar.querySelector('.gh-ref-confirm');
+  if(old) old.remove();
+  const msg = document.createElement('span');
+  msg.className='gh-ref-confirm';
+  msg.style.cssText='font-size:11px;color:#6ee7b7;padding:0 4px';
+  msg.textContent='✅ Pinned!';
+  bar.appendChild(msg);
+  setTimeout(()=>msg.remove(), 2000);
+}
+
 function setLang(l){
   S.lang=l; S.stage='idle'; S.files=null; S.chat=[]; S.unitTests=''; S.robotTests=''; S.testStage='idle';
   render();
@@ -912,7 +932,7 @@ async function doGenerate(){
   S.stage='generating'; S.files=null; S.chat=[];
   renderMain();
   try{
-    const res=await post('/api/generate',{operation:S.op,language:S.lang});
+    const res=await post('/api/generate',{operation:S.op,language:S.lang,refContent:S.ghRef.content});
     if(res.error){ alert('Generation error: '+res.error); S.stage='idle'; renderMain(); return; }
     S.files=res.files; S.stage='generated'; S.codeTab='controller';
     renderMain();
@@ -949,6 +969,7 @@ async function doChat(){
       operationName:S.op.name,
       history:S.chat.slice(0,-1), files:S.files,
       language:S.lang, userMessage:msg,
+      refContent:S.ghRef.content,
     });
     if(res.error){ S.chat.push({role:'assistant',content:'⚠ Error: '+res.error}); }
     else{
