@@ -349,6 +349,139 @@ ${method === 'DELETE' ? `async def ${snake}(
 `;
 }
 
+export function pyApiClient(op: WsdlOperation): string {
+  const pascal = toPascal(op.name);
+  const snake = toSnake(op.name);
+  const method = httpMethod(op.name);
+  const isGetter = method === 'GET';
+  const endpoint = `/api/v1/${toKebab(op.name)}`;
+  const hasBody = !isGetter && method !== 'DELETE';
+
+  const schemaImport = hasBody
+    ? `from .schemas import ${pascal}Request, ${pascal}Response`
+    : `from .schemas import ${pascal}Response`;
+
+  const param = isGetter || method === 'DELETE' ? 'self' : `self, request: ${pascal}Request`;
+  const returnType = method === 'DELETE' ? 'None' : `${pascal}Response`;
+  const usageCall = isGetter ? `result = client.${snake}()` : `result = client.${snake}(request)`;
+
+  let httpCall: string;
+  if (method === 'GET') {
+    httpCall = `        response = self._client.get(f"{self.base_url}${endpoint}")\n        response.raise_for_status()\n        return ${pascal}Response(**response.json())`;
+  } else if (method === 'DELETE') {
+    httpCall = `        response = self._client.delete(f"{self.base_url}${endpoint}")\n        response.raise_for_status()`;
+  } else if (method === 'POST') {
+    httpCall = `        response = self._client.post(\n            f"{self.base_url}${endpoint}",\n            content=request.model_dump_json(),\n            headers={"Content-Type": "application/json"},\n        )\n        response.raise_for_status()\n        return ${pascal}Response(**response.json())`;
+  } else {
+    httpCall = `        response = self._client.put(\n            f"{self.base_url}${endpoint}",\n            content=request.model_dump_json(),\n            headers={"Content-Type": "application/json"},\n        )\n        response.raise_for_status()\n        return ${pascal}Response(**response.json())`;
+  }
+
+  return `"""REST API client for the '${op.name}' endpoint."""
+from __future__ import annotations
+
+import httpx
+
+${schemaImport}
+
+
+class ${pascal}ApiClient:
+    """
+    Typed HTTP client for the ${op.name} REST endpoint.
+
+    Use this class to call the generated REST API from another
+    Python service or script.
+
+    Example::
+
+        with ${pascal}ApiClient(base_url="http://localhost:8000") as client:
+            ${usageCall}
+    """
+
+    def __init__(self, base_url: str = "http://localhost:8000", timeout: float = 30.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.Client(timeout=timeout)
+
+    def ${snake}(${param}) -> ${returnType}:
+        """
+        Call the ${op.name} REST endpoint.
+
+        Raises:
+            httpx.HTTPStatusError: When the server returns a non-2xx status.
+        """
+${httpCall}
+
+    def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
+        self._client.close()
+
+    def __enter__(self) -> "${pascal}ApiClient":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+`;
+}
+
+export function generateJsClientTs(op: WsdlOperation): string {
+  const camel = toCamel(op.name);
+  const pascal = toPascal(op.name);
+  const method = httpMethod(op.name);
+  const isGetter = method === 'GET';
+  const endpoint = `/api/v1/${toKebab(op.name)}`;
+  const hasBody = !isGetter && method !== 'DELETE';
+
+  const fetchCall = hasBody
+    ? `  const response = await fetch(\`\${baseUrl}${endpoint}\`, {\n    method: '${method}',\n    headers: { 'Content-Type': 'application/json', ...headers },\n    body: JSON.stringify(request),\n  });`
+    : `  const response = await fetch(\`\${baseUrl}${endpoint}\`, {\n    method: '${method}',\n    headers: { 'Content-Type': 'application/json', ...headers },\n  });`;
+
+  const funcParams = hasBody
+    ? `request, { baseUrl = 'http://localhost:8080', headers = {} } = {}`
+    : `{ baseUrl = 'http://localhost:8080', headers = {} } = {}`;
+
+  const jsdocParam = hasBody ? ` * @param {object} request  The request body matching the ${pascal}Request schema.\n` : '';
+  const returnTypeDoc = method === 'DELETE'
+    ? ' * @returns {Promise<void>}'
+    : ` * @returns {Promise<object>} The ${pascal}Response JSON object.`;
+
+  const resolveBlock = method === 'DELETE' ? '  // DELETE returns no body' : '  return response.json();';
+
+  return `/**
+ * JavaScript REST API client for the ${op.name} endpoint.
+ *
+ * Generated from the N-Central WSDL operation '${op.name}'.
+ * Drop this file into any JS/TS project — no dependencies required.
+ *
+ * @example
+ * import { ${camel} } from './${toKebab(op.name)}_client.js';
+ *
+ * // Usage:
+ * const result = await ${camel}(${hasBody ? 'request, ' : ''}{ baseUrl: 'https://your-api-host' });
+ * console.log(result);
+ */
+
+'use strict';
+
+/**
+ * Call the ${op.name} REST endpoint.
+ *
+${jsdocParam} * @param {string} [options.baseUrl]   Base URL of the REST server (default: 'http://localhost:8080').
+ * @param {object} [options.headers]   Extra HTTP headers to include.
+ ${returnTypeDoc}
+ * @throws {Error} When the server returns a non-OK HTTP status.
+ */
+export async function ${camel}(${funcParams}) {
+${fetchCall}
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(\`${op.name} failed: \${response.status} \${errorText}\`);
+  }
+
+  ${resolveBlock}
+}
+`;
+}
+
 export function pyGenerateAllFiles(op: WsdlOperation): GeneratedFiles {
   return {
     requestDto: pyRequestDto(op),
@@ -357,6 +490,8 @@ export function pyGenerateAllFiles(op: WsdlOperation): GeneratedFiles {
     serviceImpl: pyServiceImpl(op),
     transformer: pyTransformer(op),
     controller: pyController(op),
+    apiClient: pyApiClient(op),
+    jsClient: generateJsClientTs(op),
   };
 }
 

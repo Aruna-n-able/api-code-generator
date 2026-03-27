@@ -108,6 +108,8 @@ export default function ChatInterface({
         if (result.updatedCode.transformer) mapped.transformer = result.updatedCode.transformer;
         if (result.updatedCode.requestDto) mapped.requestDto = result.updatedCode.requestDto;
         if (result.updatedCode.responseDto) mapped.responseDto = result.updatedCode.responseDto;
+        if (result.updatedCode.apiClient) mapped.apiClient = result.updatedCode.apiClient;
+        if (result.updatedCode.jsClient) mapped.jsClient = result.updatedCode.jsClient;
         if (Object.keys(mapped).length) onFilesUpdate(mapped);
       }
     } catch (e) {

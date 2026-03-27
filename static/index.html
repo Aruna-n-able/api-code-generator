@@ -291,7 +291,7 @@ async function post(url,data){ const r=await fetch(url,{method:'POST',headers:{'
 function langLabel(){ return S.lang==='java'?'☕ Java':'🐍 Python' }
 function langDesc(){ return S.lang==='java'?'Spring Boot 3 · Lombok · Jakarta EE':'FastAPI · Pydantic v2 · zeep' }
 
-const CODE_TABS = ['controller','serviceInterface','serviceImpl','transformer','requestDto','responseDto'];
+const CODE_TABS = ['controller','serviceInterface','serviceImpl','transformer','requestDto','responseDto','apiClient','jsClient'];
 const TAB_NAMES = {
   controller:       {java:'Controller',      python:'Router'},
   serviceInterface: {java:'Service',         python:'Service Base'},
@@ -299,6 +299,8 @@ const TAB_NAMES = {
   transformer:      {java:'Transformer',     python:'Transformer'},
   requestDto:       {java:'RequestDTO',      python:'RequestSchema'},
   responseDto:      {java:'ResponseDTO',     python:'ResponseSchema'},
+  apiClient:        {java:'API Client',      python:'API Client'},
+  jsClient:         {java:'JS Client',       python:'JS Client'},
 };
 function tabLabel(t){ return TAB_NAMES[t][S.lang] }
 function tabFilename(t,opName){
@@ -310,6 +312,8 @@ function tabFilename(t,opName){
     transformer:     S.lang==='java'?p+'Transformer.java':sn+'_transformer.py',
     requestDto:      S.lang==='java'?p+'Request.java':sn+'_request.py',
     responseDto:     S.lang==='java'?p+'Response.java':sn+'_response.py',
+    apiClient:       S.lang==='java'?p+'ApiClient.java':sn+'_client.py',
+    jsClient:        sn+'_client.js',
   };
   return map[t];
 }
@@ -389,7 +393,7 @@ function renderWelcome(){
     </div>
     <div class="welcome-grid">
       ${[['📄','Upload WSDL','Parse N-Central WSDL to extract all operations with request/response field definitions'],
-         ['⚡','Generate Code','Create Controller, Service, Transformer, and DTO classes in Java or Python'],
+         ['⚡','Generate Code','Create Controller, Service, Transformer, DTO classes, API Client and JS Client in Java or Python'],
          ['🧪','Generate Tests','Produce JUnit 5 / pytest unit tests and Robot Framework acceptance tests'],
         ].map(([i,t,d])=>`
         <div class="card">
@@ -618,8 +622,11 @@ async function doGenerate(){
 
 function setCodeTab(t){
   S.codeTab=t;
-  // Update tabs without full re-render
-  document.querySelectorAll('#codeTabs .tab').forEach(b=>b.classList.toggle('active',b.textContent.trim()===tabLabel(t)));
+  // Update tabs without full re-render — match by onclick attribute (contains tab key)
+  document.querySelectorAll('#codeTabs .tab').forEach(b=>{
+    const match=b.getAttribute('onclick')||'';
+    b.classList.toggle('active', match.includes(`'${t}'`));
+  });
   const d=document.getElementById('codeDisp');
   if(d) d.textContent=activeCode();
 }

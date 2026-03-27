@@ -9,6 +9,11 @@ interface TabDef {
   label: string;
   javaFileName: (op: string) => string;
   pythonFileName: (op: string) => string;
+  syntaxLang?: string;
+}
+
+function toSnake(s: string): string {
+  return s.replace(/([A-Z])/g, (c, ch, i) => (i > 0 ? '_' : '') + ch.toLowerCase()).replace(/^_/, '');
 }
 
 const TABS: TabDef[] = [
@@ -16,37 +21,50 @@ const TABS: TabDef[] = [
     key: 'controller',
     label: 'Controller',
     javaFileName: (op) => `${op}Controller.java`,
-    pythonFileName: (op) => `${op.toLowerCase()}_router.py`,
+    pythonFileName: (op) => `${toSnake(op)}_router.py`,
   },
   {
     key: 'serviceInterface',
     label: 'Service',
     javaFileName: (op) => `${op}Service.java`,
-    pythonFileName: (op) => `${op.toLowerCase()}_service_base.py`,
+    pythonFileName: (op) => `${toSnake(op)}_service_base.py`,
   },
   {
     key: 'serviceImpl',
     label: 'ServiceImpl',
     javaFileName: (op) => `${op}ServiceImpl.java`,
-    pythonFileName: (op) => `${op.toLowerCase()}_service.py`,
+    pythonFileName: (op) => `${toSnake(op)}_service.py`,
   },
   {
     key: 'transformer',
     label: 'Transformer',
     javaFileName: (op) => `${op}Transformer.java`,
-    pythonFileName: (op) => `${op.toLowerCase()}_transformer.py`,
+    pythonFileName: (op) => `${toSnake(op)}_transformer.py`,
   },
   {
     key: 'requestDto',
     label: 'RequestDTO',
     javaFileName: (op) => `${op}Request.java`,
-    pythonFileName: (op) => `${op.toLowerCase()}_request.py`,
+    pythonFileName: (op) => `${toSnake(op)}_request.py`,
   },
   {
     key: 'responseDto',
     label: 'ResponseDTO',
     javaFileName: (op) => `${op}Response.java`,
-    pythonFileName: (op) => `${op.toLowerCase()}_response.py`,
+    pythonFileName: (op) => `${toSnake(op)}_response.py`,
+  },
+  {
+    key: 'apiClient',
+    label: 'API Client',
+    javaFileName: (op) => `${op}ApiClient.java`,
+    pythonFileName: (op) => `${toSnake(op)}_client.py`,
+  },
+  {
+    key: 'jsClient',
+    label: 'JS Client',
+    javaFileName: (op) => `${toSnake(op)}_client.js`,
+    pythonFileName: (op) => `${toSnake(op)}_client.js`,
+    syntaxLang: 'javascript',
   },
 ];
 
@@ -61,12 +79,12 @@ export default function GeneratedCode({ files, operationName, language }: Props)
   const [copied, setCopied] = useState(false);
 
   const currentTab = TABS.find((t) => t.key === activeTab)!;
-  const code = files[activeTab];
+  const code = files[activeTab] ?? '';
   const fileName =
     language === 'java'
       ? currentTab.javaFileName(operationName)
       : currentTab.pythonFileName(operationName);
-  const syntaxLang = language === 'java' ? 'java' : 'python';
+  const syntaxLang = currentTab.syntaxLang ?? (language === 'java' ? 'java' : 'python');
 
   const copyCode = async () => {
     await navigator.clipboard.writeText(code);

@@ -494,6 +494,162 @@ def java_controller(op: dict, pkg: str) -> str:
     )
 
 
+def java_api_client(op: dict, pkg: str) -> str:
+    """Generate a Spring RestTemplate-based REST API client for the operation."""
+    pascal = _pascal(op["name"])
+    camel = _camel(op["name"])
+    method = _http_method(op["name"])
+    is_getter = method == "GET"
+    endpoint = f"/api/v1/{_kebab(op['name'])}"
+
+    method_annotation = {
+        "GET": "getForEntity",
+        "DELETE": "delete",
+        "POST": "postForEntity",
+        "PUT": "exchange",
+    }[method]
+
+    if method == "GET":
+        http_call = (
+            f"        log.info(\"Calling {method} {endpoint}\");\n"
+            f"        ResponseEntity<{pascal}Response> response =\n"
+            f"                restTemplate.getForEntity(baseUrl + \"{endpoint}\", {pascal}Response.class);\n"
+            f"        return response.getBody();"
+        )
+    elif method == "DELETE":
+        http_call = (
+            f"        log.info(\"Calling {method} {endpoint}\");\n"
+            f"        restTemplate.delete(baseUrl + \"{endpoint}\");"
+        )
+    elif method == "POST":
+        http_call = (
+            f"        log.info(\"Calling {method} {endpoint} with request: {{}}\", request);\n"
+            f"        ResponseEntity<{pascal}Response> response =\n"
+            f"                restTemplate.postForEntity(baseUrl + \"{endpoint}\", request, {pascal}Response.class);\n"
+            f"        return response.getBody();"
+        )
+    else:  # PUT
+        http_call = (
+            f"        log.info(\"Calling {method} {endpoint} with request: {{}}\", request);\n"
+            f"        HttpEntity<{pascal}Request> entity = new HttpEntity<>(request);\n"
+            f"        ResponseEntity<{pascal}Response> response =\n"
+            f"                restTemplate.exchange(baseUrl + \"{endpoint}\", HttpMethod.PUT, entity, {pascal}Response.class);\n"
+            f"        return response.getBody();"
+        )
+
+    return_type = "void" if method == "DELETE" else f"{pascal}Response"
+    req_param = "" if is_getter or method == "DELETE" else f"{pascal}Request request"
+    http_entity_import = "\nimport org.springframework.http.HttpEntity;" if method == "PUT" else ""
+    http_method_import = "\nimport org.springframework.http.HttpMethod;" if method == "PUT" else ""
+    response_entity_import = "\nimport org.springframework.http.ResponseEntity;" if method != "DELETE" else ""
+    request_dto_import = f"\nimport {pkg}.dto.{pascal}Request;" if not is_getter and method != "DELETE" else ""
+    response_dto_import = f"\nimport {pkg}.dto.{pascal}Response;" if method != "DELETE" else ""
+
+    return (
+        f"package {pkg}.client;\n\n"
+        f"import lombok.RequiredArgsConstructor;\n"
+        f"import lombok.extern.slf4j.Slf4j;\n"
+        f"import org.springframework.beans.factory.annotation.Value;\n"
+        f"import org.springframework.stereotype.Component;\n"
+        f"import org.springframework.web.client.RestTemplate;{http_entity_import}{http_method_import}{response_entity_import}{request_dto_import}{response_dto_import}\n\n"
+        f"/**\n"
+        f" * REST API client for the {{@code {op['name']}}} endpoint.\n"
+        f" *\n"
+        f" * <p>Inject this bean to call the {op['name']} REST API from another\n"
+        f" * Spring component. Configure the server URL with the\n"
+        f" * {{@code api.base-url}} property.</p>\n"
+        f" */\n"
+        f"@Slf4j\n"
+        f"@Component\n"
+        f"@RequiredArgsConstructor\n"
+        f"public class {pascal}ApiClient {{\n\n"
+        f"    private final RestTemplate restTemplate;\n\n"
+        f"    @Value(\"${{api.base-url:http://localhost:8080}}\")\n"
+        f"    private String baseUrl;\n\n"
+        f"    /**\n"
+        f"     * Calls the {op['name']} REST endpoint.\n"
+        f"     *\n"
+        + (f"     * @param request the request body\n     *\n" if not is_getter and method != "DELETE" else "")
+        + f"     * @return the {pascal}Response from the server\n"
+        f"     */\n"
+        f"    public {return_type} {camel}({req_param}) {{\n"
+        f"{http_call}\n"
+        f"    }}\n}}\n"
+    )
+
+
+def js_api_client(op: dict) -> str:
+    """Generate a vanilla JavaScript (fetch) REST API client for the operation."""
+    pascal = _pascal(op["name"])
+    camel = _camel(op["name"])
+    method = _http_method(op["name"])
+    is_getter = method == "GET"
+    endpoint = f"/api/v1/{_kebab(op['name'])}"
+
+    has_body = not is_getter and method != "DELETE"
+
+    if has_body:
+        fetch_call = (
+            f"  const response = await fetch(`${{baseUrl}}{endpoint}`, {{\n"
+            f"    method: '{method}',\n"
+            f"    headers: {{ 'Content-Type': 'application/json', ...headers }},\n"
+            f"    body: JSON.stringify(request),\n"
+            f"  }});"
+        )
+        jsdoc_param = f" * @param {{object}} request  The request body matching the {pascal}Request schema.\n"
+        func_params = "request, { baseUrl = 'http://localhost:8080', headers = {} } = {}"
+    else:
+        fetch_call = (
+            f"  const response = await fetch(`${{baseUrl}}{endpoint}`, {{\n"
+            f"    method: '{method}',\n"
+            f"    headers: {{ 'Content-Type': 'application/json', ...headers }},\n"
+            f"  }});"
+        )
+        jsdoc_param = ""
+        func_params = "{ baseUrl = 'http://localhost:8080', headers = {} } = {}"
+
+    if method == "DELETE":
+        resolve_block = "  // DELETE returns no body"
+        return_type_doc = " * @returns {Promise<void>}"
+    else:
+        resolve_block = "  return response.json();"
+        return_type_doc = f" * @returns {{Promise<object>}} The {pascal}Response JSON object."
+
+    return (
+        f"/**\n"
+        f" * JavaScript REST API client for the {op['name']} endpoint.\n"
+        f" *\n"
+        f" * Generated from the N-Central WSDL operation '{op['name']}'.\n"
+        f" * Drop this file into any JS/TS project — no dependencies required.\n"
+        f" *\n"
+        f" * @example\n"
+        f" * import {{ {camel} }} from './{_snake(op['name'])}_client.js';\n"
+        f" *\n"
+        f" * // Usage:\n"
+        f" * const result = await {camel}({f'request, ' if has_body else ''}{{ baseUrl: 'https://your-api-host' }});\n"
+        f" * console.log(result);\n"
+        f" */\n\n"
+        f"'use strict';\n\n"
+        f"/**\n"
+        f" * Call the {op['name']} REST endpoint.\n"
+        f" *\n"
+        f"{jsdoc_param}"
+        f" * @param {{string}} [options.baseUrl]   Base URL of the REST server (default: 'http://localhost:8080').\n"
+        f" * @param {{object}} [options.headers]   Extra HTTP headers to include.\n"
+        f" {return_type_doc}\n"
+        f" * @throws {{Error}} When the server returns a non-OK HTTP status.\n"
+        f" */\n"
+        f"export async function {camel}({func_params}) {{\n"
+        f"{fetch_call}\n\n"
+        f"  if (!response.ok) {{\n"
+        f"    const errorText = await response.text().catch(() => response.statusText);\n"
+        f"    throw new Error(`{op['name']} failed: ${{response.status}} ${{errorText}}`);\n"
+        f"  }}\n\n"
+        f"  {resolve_block}\n"
+        f"}}\n"
+    )
+
+
 def java_generate_all(op: dict, pkg: str = "com.ncentral.api") -> dict:
     return {
         "requestDto": java_request_dto(op, pkg),
@@ -502,6 +658,8 @@ def java_generate_all(op: dict, pkg: str = "com.ncentral.api") -> dict:
         "serviceImpl": java_service_impl(op, pkg),
         "transformer": java_transformer(op, pkg),
         "controller": java_controller(op, pkg),
+        "apiClient": java_api_client(op, pkg),
+        "jsClient": js_api_client(op),
     }
 
 
@@ -913,6 +1071,86 @@ def py_controller(op: dict) -> str:
     )
 
 
+def py_api_client(op: dict) -> str:
+    """Generate an httpx-based typed REST API client for the operation."""
+    pascal = _pascal(op["name"])
+    snake = _snake(op["name"])
+    method = _http_method(op["name"])
+    is_getter = method == "GET"
+    endpoint = f"/api/v1/{_kebab(op['name'])}"
+    has_body = not is_getter and method != "DELETE"
+
+    if method == "GET":
+        http_call = (
+            f"        response = self._client.get(f\"{{self.base_url}}{endpoint}\")\n"
+            f"        response.raise_for_status()\n"
+            f"        return {pascal}Response(**response.json())"
+        )
+    elif method == "DELETE":
+        http_call = (
+            f"        response = self._client.delete(f\"{{self.base_url}}{endpoint}\")\n"
+            f"        response.raise_for_status()"
+        )
+    elif method == "POST":
+        http_call = (
+            f"        response = self._client.post(\n"
+            f"            f\"{{self.base_url}}{endpoint}\",\n"
+            f"            content=request.model_dump_json(),\n"
+            f"            headers={{\"Content-Type\": \"application/json\"}},\n"
+            f"        )\n"
+            f"        response.raise_for_status()\n"
+            f"        return {pascal}Response(**response.json())"
+        )
+    else:  # PUT
+        http_call = (
+            f"        response = self._client.put(\n"
+            f"            f\"{{self.base_url}}{endpoint}\",\n"
+            f"            content=request.model_dump_json(),\n"
+            f"            headers={{\"Content-Type\": \"application/json\"}},\n"
+            f"        )\n"
+            f"        response.raise_for_status()\n"
+            f"        return {pascal}Response(**response.json())"
+        )
+
+    return_type = "None" if method == "DELETE" else f"{pascal}Response"
+    param = "self" if is_getter or method == "DELETE" else f"self, request: {pascal}Request"
+    schema_import = f"from .schemas import {pascal}Request, {pascal}Response" if has_body else f"from .schemas import {pascal}Response"
+    request_import = schema_import if not has_body else schema_import
+
+    return (
+        f'"""REST API client for the \'{op["name"]}\' endpoint."""\n'
+        f"from __future__ import annotations\n\n"
+        f"import httpx\n\n"
+        f"{request_import}\n\n\n"
+        f"class {pascal}ApiClient:\n"
+        f'    """\n'
+        f"    Typed HTTP client for the {op['name']} REST endpoint.\n\n"
+        f"    Use this class to call the generated REST API from another\n"
+        f"    Python service or script.\n\n"
+        f"    Example::\n\n"
+        f"        with {pascal}ApiClient(base_url=\"http://localhost:8000\") as client:\n"
+        f"            {'result = client.' + snake + '()' if is_getter else 'result = client.' + snake + '(request)'}\n"
+        f"    \"\"\"\n\n"
+        f"    def __init__(self, base_url: str = \"http://localhost:8000\", timeout: float = 30.0) -> None:\n"
+        f"        self.base_url = base_url.rstrip(\"/\")\n"
+        f"        self._client = httpx.Client(timeout=timeout)\n\n"
+        f"    def {snake}({param}) -> {return_type}:\n"
+        f'        """\n'
+        f"        Call the {op['name']} REST endpoint.\n\n"
+        f"        Raises:\n"
+        f"            httpx.HTTPStatusError: When the server returns a non-2xx status.\n"
+        f'        """\n'
+        f"{http_call}\n\n"
+        f"    def close(self) -> None:\n"
+        f'        """Close the underlying HTTP connection pool."""\n'
+        f"        self._client.close()\n\n"
+        f"    def __enter__(self) -> \"{pascal}ApiClient\":\n"
+        f"        return self\n\n"
+        f"    def __exit__(self, *args: object) -> None:\n"
+        f"        self.close()\n"
+    )
+
+
 def py_generate_all(op: dict) -> dict:
     return {
         "requestDto": py_request_dto(op),
@@ -921,6 +1159,8 @@ def py_generate_all(op: dict) -> dict:
         "serviceImpl": py_service_impl(op),
         "transformer": py_transformer(op),
         "controller": py_controller(op),
+        "apiClient": py_api_client(op),
+        "jsClient": js_api_client(op),
     }
 
 
@@ -1143,7 +1383,8 @@ def api_ai_refine():
             "wrap N-Central SOAP/WSDL operations. Help refine and improve generated Java code.\n\n"
             "Return improved files in Markdown fenced code blocks with these tags:\n"
             "```java:controller  ```java:service  ```java:serviceImpl\n"
-            "```java:transformer  ```java:requestDto  ```java:responseDto\n\n"
+            "```java:transformer  ```java:requestDto  ```java:responseDto\n"
+            "```java:apiClient  ```javascript:jsClient\n\n"
             "Only include files that changed. Use plain text for explanations."
         )
         tag = "java"
@@ -1153,7 +1394,8 @@ def api_ai_refine():
             "wrap N-Central SOAP/WSDL operations. Help refine and improve generated Python code.\n\n"
             "Return improved files in Markdown fenced code blocks with these tags:\n"
             "```python:controller  ```python:service  ```python:serviceImpl\n"
-            "```python:transformer  ```python:requestDto  ```python:responseDto\n\n"
+            "```python:transformer  ```python:requestDto  ```python:responseDto\n"
+            "```python:apiClient  ```javascript:jsClient\n\n"
             "Only include files that changed. Use plain text for explanations."
         )
         tag = "python"
@@ -1173,8 +1415,8 @@ def api_ai_refine():
         )
         reply = completion.choices[0].message.content or ""
         updated = {}
-        for m in re.finditer(rf"```{tag}:(\w+)\n([\s\S]*?)```", reply):
-            updated[m.group(1)] = m.group(2).rstrip()
+        for m in re.finditer(rf"```({tag}|javascript):(\w+)\n([\s\S]*?)```", reply):
+            updated[m.group(2)] = m.group(3).rstrip()
         return jsonify({"message": reply, "updatedFiles": updated or None})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500

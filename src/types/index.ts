@@ -29,6 +29,8 @@ export interface GeneratedFiles {
   serviceImpl: string;
   transformer: string;
   controller: string;
+  apiClient: string;
+  jsClient: string;
 }
 
 export interface ChatMessage {
@@ -45,7 +47,9 @@ export type CodeTab =
   | 'serviceInterface'
   | 'serviceImpl'
   | 'transformer'
-  | 'controller';
+  | 'controller'
+  | 'apiClient'
+  | 'jsClient';
 
 export type TestTab = 'unit' | 'robot';
 

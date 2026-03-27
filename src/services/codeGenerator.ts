@@ -358,6 +358,144 @@ public class ${pascal}Controller {
 `;
 }
 
+export function generateApiClient(op: WsdlOperation, pkg: string): string {
+  const pascal = toPascal(op.name);
+  const camel = toCamel(op.name);
+  const method = httpMethod(op.name);
+  const isGetter = method === 'GET';
+  const endpoint = `/api/v1/${toKebab(op.name)}`;
+
+  const reqParam = isGetter || method === 'DELETE' ? '' : `${pascal}Request request`;
+  const returnType = method === 'DELETE' ? 'Void' : `${pascal}Response`;
+  const httpEntityImport = method === 'PUT' ? '\nimport org.springframework.http.HttpEntity;' : '';
+  const httpMethodImport = method === 'PUT' ? '\nimport org.springframework.http.HttpMethod;' : '';
+  const responseEntityImport = method !== 'DELETE' ? '\nimport org.springframework.http.ResponseEntity;' : '';
+  const requestDtoImport = !isGetter && method !== 'DELETE' ? `\nimport ${pkg}.dto.${pascal}Request;` : '';
+  const responseDtoImport = method !== 'DELETE' ? `\nimport ${pkg}.dto.${pascal}Response;` : '';
+
+  let httpCall: string;
+  if (method === 'GET') {
+    httpCall =
+      `        log.info("Calling GET ${endpoint}");\n` +
+      `        ResponseEntity<${pascal}Response> response =\n` +
+      `                restTemplate.getForEntity(baseUrl + "${endpoint}", ${pascal}Response.class);\n` +
+      `        return response.getBody();`;
+  } else if (method === 'DELETE') {
+    httpCall =
+      `        log.info("Calling DELETE ${endpoint}");\n` +
+      `        restTemplate.delete(baseUrl + "${endpoint}");`;
+  } else if (method === 'POST') {
+    httpCall =
+      `        log.info("Calling POST ${endpoint} with request: {}", request);\n` +
+      `        ResponseEntity<${pascal}Response> response =\n` +
+      `                restTemplate.postForEntity(baseUrl + "${endpoint}", request, ${pascal}Response.class);\n` +
+      `        return response.getBody();`;
+  } else {
+    httpCall =
+      `        log.info("Calling PUT ${endpoint} with request: {}", request);\n` +
+      `        HttpEntity<${pascal}Request> entity = new HttpEntity<>(request);\n` +
+      `        ResponseEntity<${pascal}Response> response =\n` +
+      `                restTemplate.exchange(baseUrl + "${endpoint}", HttpMethod.PUT, entity, ${pascal}Response.class);\n` +
+      `        return response.getBody();`;
+  }
+
+  return `package ${pkg}.client;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestTemplate;${httpEntityImport}${httpMethodImport}${responseEntityImport}${requestDtoImport}${responseDtoImport}
+
+/**
+ * REST API client for the {@code ${op.name}} endpoint.
+ *
+ * <p>Inject this bean to call the ${op.name} REST API from another
+ * Spring component. Configure the server URL with the
+ * {@code api.base-url} property.</p>
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class ${pascal}ApiClient {
+
+    private final RestTemplate restTemplate;
+
+    @Value("\${api.base-url:http://localhost:8080}")
+    private String baseUrl;
+
+    /**
+     * Calls the ${op.name} REST endpoint.
+     *${!isGetter && method !== 'DELETE' ? `\n     * @param request the request body\n     *` : ''}
+     * @return the ${pascal}Response from the server
+     */
+    public ${returnType} ${camel}(${reqParam}) {
+${httpCall}
+    }
+}
+`;
+}
+
+export function generateJsClient(op: WsdlOperation): string {
+  const camel = toCamel(op.name);
+  const pascal = toPascal(op.name);
+  const method = httpMethod(op.name);
+  const isGetter = method === 'GET';
+  const endpoint = `/api/v1/${toKebab(op.name)}`;
+  const hasBody = !isGetter && method !== 'DELETE';
+
+  const fetchCall = hasBody
+    ? `  const response = await fetch(\`\${baseUrl}${endpoint}\`, {\n    method: '${method}',\n    headers: { 'Content-Type': 'application/json', ...headers },\n    body: JSON.stringify(request),\n  });`
+    : `  const response = await fetch(\`\${baseUrl}${endpoint}\`, {\n    method: '${method}',\n    headers: { 'Content-Type': 'application/json', ...headers },\n  });`;
+
+  const funcParams = hasBody
+    ? `request, { baseUrl = 'http://localhost:8080', headers = {} } = {}`
+    : `{ baseUrl = 'http://localhost:8080', headers = {} } = {}`;
+
+  const jsdocParam = hasBody ? ` * @param {object} request  The request body matching the ${pascal}Request schema.\n` : '';
+  const returnTypeDoc = method === 'DELETE'
+    ? ' * @returns {Promise<void>}'
+    : ` * @returns {Promise<object>} The ${pascal}Response JSON object.`;
+
+  const resolveBlock = method === 'DELETE' ? '  // DELETE returns no body' : '  return response.json();';
+
+  return `/**
+ * JavaScript REST API client for the ${op.name} endpoint.
+ *
+ * Generated from the N-Central WSDL operation '${op.name}'.
+ * Drop this file into any JS/TS project — no dependencies required.
+ *
+ * @example
+ * import { ${camel} } from './${toKebab(op.name)}_client.js';
+ *
+ * // Usage:
+ * const result = await ${camel}(${hasBody ? 'request, ' : ''}{ baseUrl: 'https://your-api-host' });
+ * console.log(result);
+ */
+
+'use strict';
+
+/**
+ * Call the ${op.name} REST endpoint.
+ *
+${jsdocParam} * @param {string} [options.baseUrl]   Base URL of the REST server (default: 'http://localhost:8080').
+ * @param {object} [options.headers]   Extra HTTP headers to include.
+ ${returnTypeDoc}
+ * @throws {Error} When the server returns a non-OK HTTP status.
+ */
+export async function ${camel}(${funcParams}) {
+${fetchCall}
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(\`${op.name} failed: \${response.status} \${errorText}\`);
+  }
+
+  ${resolveBlock}
+}
+`;
+}
+
 export function generateAllFiles(op: WsdlOperation, pkg = 'com.ncentral.api'): GeneratedFiles {
   return {
     requestDto: generateRequestDto(op, pkg),
@@ -366,6 +504,8 @@ export function generateAllFiles(op: WsdlOperation, pkg = 'com.ncentral.api'): G
     serviceImpl: generateServiceImpl(op, pkg),
     transformer: generateTransformer(op, pkg),
     controller: generateController(op, pkg),
+    apiClient: generateApiClient(op, pkg),
+    jsClient: generateJsClient(op),
   };
 }
 
