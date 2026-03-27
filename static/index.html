@@ -580,11 +580,12 @@ function renderOpView(){
           ${S.chatBusy?'<span class="spin"></span>':'Send'}
         </button>
       </div>
-      ${S.chat.length&&!isSat?`
+      ${!isSat?`
       <div style="margin-top:12px;text-align:center">
-        <button class="btn btn-green" onclick="doSatisfied()">✓ I'm satisfied — unlock test generation</button>
+        <button class="btn btn-green" onclick="doSatisfied()">✅ Approve Code</button>
+        <p style="font-size:11px;color:var(--dim);margin-top:6px">Approving the code unlocks test generation.</p>
       </div>`:''}
-      ${isSat?`<div class="sat-badge" style="margin-top:10px">✓ Code accepted — test generation unlocked</div>`:''}
+      ${isSat?`<div class="sat-badge" style="margin-top:10px">✅ Code approved — test generation unlocked</div>`:''}
     </div>
 
     <!-- Tests -->
@@ -593,7 +594,7 @@ function renderOpView(){
       <span style="font-size:28px">🧪</span>
       <div>
         <p style="font-size:13px;font-weight:500;color:var(--muted)">Test generation locked</p>
-        <p style="font-size:12px;color:var(--dim);margin-top:2px">Click "I'm satisfied" in the chat panel to unlock.</p>
+        <p style="font-size:12px;color:var(--dim);margin-top:2px">Click "Approve Code" in the code panel to unlock.</p>
       </div>
     </div>`}
     `:''}
